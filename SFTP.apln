@@ -105,18 +105,12 @@
     ∇
 
     ⍝ Extract a little-endian unsigned integer from a byte vector
-    _le4←{256⊥⌽⍵}
-    _le8←{256⊥⌽⍵}
+    _le←{256⊥⌽⍵}
 
     ⍝ Get error message from libssh2 session
     ∇ msg←_errmsg session;rc;msgp;msgl
         rc msgp msgl←libssh2_session_last_error session 0 0 0
         msg←_readcstr msgp
-    ∇
-
-    ⍝ Check return code and signal error if non-zero
-    ∇ _check(rc session)
-        ⎕SIGNAL(rc≠0)/⊂('EN'SFTP_ERR)('Message'(_errmsg session))
     ∇
 
     ⍝ Resolve hostname and connect a TCP socket, return fd
@@ -131,9 +125,9 @@
 
         ⍝ Read the addrinfo struct to get family, addrlen, and sockaddr pointer
         aibytes←aiptr _readbytes AI_SIZE
-        family←_le4 aibytes[AI_FAMILY+⍳4]
-        addrlen←_le4 aibytes[AI_ADDRLEN+⍳4]
-        addrptr←_le8 aibytes[AI_ADDR+⍳8]
+        family←_le aibytes[AI_FAMILY+⍳4]
+        addrlen←_le aibytes[AI_ADDRLEN+⍳4]
+        addrptr←_le aibytes[AI_ADDR+⍳8]
 
         ⍝ Read the sockaddr struct
         sabytes←addrptr _readbytes addrlen
@@ -154,7 +148,7 @@
 
     ⍝ --- Public API ---
 
-    ∇ conn←ConnectWithPass(host port user pass);fd;session;sftp;rc
+    ∇ conn←ConnectWithPass(host port user pass);fd;session;sftp;rc;msg
         fd←_tcp_connect host port
 
         session←libssh2_session_init_ex 0 0 0 0
@@ -165,9 +159,10 @@
 
         rc←libssh2_session_handshake session fd
         :If rc≠0
+            msg←_errmsg session
             {}libssh2_session_free session
             {}close fd
-            ('handshake failed: ',_errmsg session)⎕SIGNAL SFTP_ERR
+            ('handshake failed: ',msg)⎕SIGNAL SFTP_ERR
         :EndIf
 
         rc←libssh2_userauth_password_ex session user(≢user)pass(≢pass)0
@@ -192,7 +187,7 @@
         conn.sftp←sftp
     ∇
 
-    ∇ conn←ConnectWithKey(host port user keyfile passphrase);fd;session;sftp;rc
+    ∇ conn←ConnectWithKey(host port user keyfile passphrase);fd;session;sftp;rc;msg
         fd←_tcp_connect host port
 
         session←libssh2_session_init_ex 0 0 0 0
@@ -203,9 +198,10 @@
 
         rc←libssh2_session_handshake session fd
         :If rc≠0
+            msg←_errmsg session
             {}libssh2_session_free session
             {}close fd
-            ('handshake failed: ',_errmsg session)⎕SIGNAL SFTP_ERR
+            ('handshake failed: ',msg)⎕SIGNAL SFTP_ERR
         :EndIf
 
         rc←libssh2_userauth_publickey_fromfile_ex session user(≢user)0 keyfile passphrase
@@ -258,6 +254,11 @@
             entries,←⊂name attrs
         :EndRepeat
         done:
+
+        :If rc<0
+            {}libssh2_sftp_close_handle handle
+            ('readdir error: ',path)⎕SIGNAL SFTP_ERR
+        :EndIf
 
         {}libssh2_sftp_close_handle handle
         listing←entries

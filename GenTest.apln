@@ -45,7 +45,7 @@
         :For i :In ⍳iterations
             op←?≢ops
             counts[op]+←1
-            :Trap 0
+            :Trap 810 99
                 :Select op
                 :Case 0 ⋄ _mkdir conn base model
                 :Case 1 ⋄ _put conn base model
@@ -151,16 +151,19 @@
         :EndIf
     ∇
 
-    ∇ _rename(conn base model);idx;entry;oldpath;dir;newname;newpath
+    ∇ _rename(conn base model);idx;entry;oldpath;dir;newname;newpath;data
         →(0=≢model.files)/0
         idx←?≢model.files
         entry←idx⊃model.files
         oldpath←0⊃entry
+        data←1⊃entry
         dir←_dirname oldpath
         newname←(_randname 4+?5),'.dat'
         newpath←(('/'≡dir)↓dir),'/',newname
         #.SFTP.Rename conn(base,oldpath)(base,newpath)
-        model.files[idx]←⊂newpath(1⊃entry)
+        model.files←(idx≠⍳≢model.files)/model.files            ⍝ remove old
+        model.files←(newpath∘≢¨_fpaths model.files)/model.files ⍝ remove collision if any
+        model.files,←⊂newpath data                              ⍝ add renamed
         ⎕←'  rename ',oldpath,' → ',newpath
     ∇
 
@@ -213,7 +216,7 @@
 
     ⍝ ── Cleanup ────────────────────────────────────────────────────
 
-    ∇ _cleanup(conn base model);sorted
+    ∇ _cleanup(conn base model);sorted;entry;d
         ⍝ Delete all files
         :For entry :In model.files
             :Trap 0 ⋄ #.SFTP.Delete conn(base,0⊃entry) ⋄ :EndTrap
