@@ -3,8 +3,9 @@
     ⍝ Maintains a model of the remote filesystem tree, applies random
     ⍝ operations, and verifies the server matches the model.
     ⍝
-    ⍝ Usage:  GenTest.Run iterations seed
-    ⍝   e.g.  GenTest.Run 50 42
+    ⍝ Usage:  GenTest.Run n seed
+    ⍝   n>0: run n iterations     e.g.  GenTest.Run 100 42
+    ⍝   n<0: run for |n seconds   e.g.  GenTest.Run ¯900 42
 
     ⎕IO←0
 
@@ -26,8 +27,9 @@
     _fullpath←{⍺,(⍵≢'/')/⍵}
 
     ⍝ ── Main entry point ───────────────────────────────────────────
-    ∇ Run(iterations seed);conn;base;model;i;op;ops;counts;fails
+    ∇ Run(n seed);conn;base;model;i;op;ops;counts;fails;t0;elapsed;timed
         ⎕RL←seed
+        timed←n<0
         ops←'mkdir' 'put' 'get' 'list' 'stat' 'rename' 'delete' 'rmdir' 'download' 'upload' 'negative'
         counts←(≢ops)⍴0
         fails←0
@@ -44,7 +46,10 @@
         model.dirs←,⊂'/'
         model.files←⍬
 
-        :For i :In ⍳iterations
+        t0←2⊃⎕AI ⋄ i←0
+        :While timed∨i<n
+            :If timed∧(1000×|n)<(2⊃⎕AI)-t0 ⋄ :Leave ⋄ :EndIf
+            i+←1
             ⍝ Bias toward constructive ops when tree is small
             :If (≢model.files)<3 ⋄ op←?2 ⋄ :Else ⋄ op←?≢ops ⋄ :EndIf
             counts[op]+←1
@@ -66,7 +71,7 @@
                 fails+←1
                 ⎕←'  FAIL #',(⍕i),' ',(op⊃ops),': ',(⍕⎕DMX.EN),' ',⎕DMX.Message
             :EndTrap
-        :EndFor
+        :EndWhile
 
         ⍝ Final verification: re-read every file and compare
         _verify conn base model
@@ -76,8 +81,10 @@
         #.SFTP.Disconnect conn
 
         ⍝ Summary
+        elapsed←((2⊃⎕AI)-t0)÷1000
         ⎕←''
         ⎕←'=== Summary ==='
+        ⎕←'Iterations: ',(⍕i),' in ',(⍕elapsed),'s'
         ⎕←↑(ops,¨':'),¨' ',¨⍕¨counts
         ⎕←'Failures: ',⍕fails
         ⎕←'Seed: ',⍕seed
