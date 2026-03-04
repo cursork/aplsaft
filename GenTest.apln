@@ -28,7 +28,7 @@
     ⍝ ── Main entry point ───────────────────────────────────────────
     ∇ Run(iterations seed);conn;base;model;i;op;ops;counts;fails
         ⎕RL←seed
-        ops←'mkdir' 'put' 'get' 'list' 'stat' 'rename' 'delete' 'rmdir'
+        ops←'mkdir' 'put' 'get' 'list' 'stat' 'rename' 'delete' 'rmdir' 'download' 'upload' 'negative'
         counts←(≢ops)⍴0
         fails←0
         base←'/tmp/aplsftp-fuzz-',⍕seed
@@ -36,14 +36,17 @@
         conn←#.SFTP.ConnectWithKey '89.167.123.234' 22 'root' '/tmp/aplsftp-test-key' ''
         ⎕←'Connected. Base: ',base
 
-        ⍝ Create base directory and seed the model
-        #.SFTP.Mkdir conn base
+        ⍝ Create base directory (clean up leftover if exists)
+        :Trap 810 ⋄ #.SFTP.Mkdir conn base
+        :Else ⋄ _nuke conn base ⋄ #.SFTP.Mkdir conn base
+        :EndTrap
         model←⎕NS''
         model.dirs←,⊂'/'
         model.files←⍬
 
         :For i :In ⍳iterations
-            op←?≢ops
+            ⍝ Bias toward constructive ops when tree is small
+            :If (≢model.files)<3 ⋄ op←?2 ⋄ :Else ⋄ op←?≢ops ⋄ :EndIf
             counts[op]+←1
             :Trap 810 99
                 :Select op
@@ -55,6 +58,9 @@
                 :Case 5 ⋄ _rename conn base model
                 :Case 6 ⋄ _delete conn base model
                 :Case 7 ⋄ _rmdir conn base model
+                :Case 8 ⋄ _download conn base model
+                :Case 9 ⋄ _upload conn base model
+                :Case 10 ⋄ _negative conn base model
                 :EndSelect
             :Else
                 fails+←1
@@ -74,6 +80,7 @@
         ⎕←'=== Summary ==='
         ⎕←↑(ops,¨':'),¨' ',¨⍕¨counts
         ⎕←'Failures: ',⍕fails
+        ⎕←'Seed: ',⍕seed
     ∇
 
     ⍝ ── Operations ─────────────────────────────────────────────────
@@ -91,8 +98,9 @@
         dir←_pick model.dirs
         name←(_randname 4+?5),'.dat'
         path←(('/'≡dir)↓dir),'/',name
-        data←?(1+?999)⍴256
+        data←?(1+?999+39001×0=?5)⍴256
         #.SFTP.Put conn data(base,path)
+        model.files←(path∘≢¨_fpaths model.files)/model.files  ⍝ remove collision if any
         model.files,←⊂path data
         ⎕←'  put ',path,' (',(⍕≢data),' bytes)'
     ∇
@@ -157,7 +165,7 @@
         entry←idx⊃model.files
         oldpath←0⊃entry
         data←1⊃entry
-        dir←_dirname oldpath
+        dir←_pick model.dirs              ⍝ random destination dir (cross-dir rename)
         newname←(_randname 4+?5),'.dat'
         newpath←(('/'≡dir)↓dir),'/',newname
         #.SFTP.Rename conn(base,oldpath)(base,newpath)
@@ -192,12 +200,98 @@
         ⎕←'  rmdir ',dir
     ∇
 
+    ∇ _download(conn base model);idx;entry;path;expected;localpath;tn;actual
+        →(0=≢model.files)/0
+        idx←?≢model.files
+        entry←idx⊃model.files
+        path←0⊃entry
+        expected←1⊃entry
+        localpath←'/private/tmp/aplsftp-test/gentest-tmp'
+        :Trap 0 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
+        #.SFTP.Download conn(base,path)localpath
+        tn←localpath ⎕NTIE 0
+        actual←256|⎕NREAD tn 83(⎕NSIZE tn)
+        ⎕NUNTIE tn
+        :Trap 0 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
+        :If expected≢actual
+            ⎕←'  DOWNLOAD MISMATCH: ',path,' expected ',(⍕≢expected),' got ',(⍕≢actual),' bytes'
+            ('download mismatch: ',path)⎕SIGNAL 99
+        :Else
+            ⎕←'  download ',path,' OK'
+        :EndIf
+    ∇
+
+    ∇ _upload(conn base model);dir;name;path;data;localpath;tn;actual
+        dir←_pick model.dirs
+        name←(_randname 4+?5),'.dat'
+        path←(('/'≡dir)↓dir),'/',name
+        data←?(1+?999)⍴256
+        localpath←'/private/tmp/aplsftp-test/gentest-tmp'
+        :Trap 0 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
+        tn←localpath ⎕NCREATE 0
+        (⎕UCS data) ⎕NAPPEND tn 80
+        ⎕NUNTIE tn
+        #.SFTP.Upload conn localpath(base,path)
+        :Trap 0 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
+        actual←#.SFTP.Get conn(base,path)
+        :If data≢actual
+            ⎕←'  UPLOAD MISMATCH: ',path,' expected ',(⍕≢data),' got ',(⍕≢actual),' bytes'
+            ('upload mismatch: ',path)⎕SIGNAL 99
+        :Else
+            model.files←(path∘≢¨_fpaths model.files)/model.files  ⍝ remove collision if any
+            model.files,←⊂path data
+            ⎕←'  upload ',path,' OK (',(⍕≢data),' bytes)'
+        :EndIf
+    ∇
+
+    ∇ _negative(conn base model);ok;scenario;dir;children;found
+        scenario←?5
+        :Select scenario
+        :Case 0  ⍝ Get nonexistent file
+            ok←0
+            :Trap 810 ⋄ #.SFTP.Get conn(base,'/nonexistent-',_randname 8) ⋄ ok←1 ⋄ :EndTrap
+            :If ok ⋄ ('expected error: get nonexistent')⎕SIGNAL 99 ⋄ :EndIf
+            ⎕←'  negative: get nonexistent OK'
+        :Case 1  ⍝ Delete nonexistent file
+            ok←0
+            :Trap 810 ⋄ #.SFTP.Delete conn(base,'/nonexistent-',_randname 8) ⋄ ok←1 ⋄ :EndTrap
+            :If ok ⋄ ('expected error: delete nonexistent')⎕SIGNAL 99 ⋄ :EndIf
+            ⎕←'  negative: delete nonexistent OK'
+        :Case 2  ⍝ Stat nonexistent path
+            ok←0
+            :Trap 810 ⋄ #.SFTP.Stat conn(base,'/nonexistent-',_randname 8) ⋄ ok←1 ⋄ :EndTrap
+            :If ok ⋄ ('expected error: stat nonexistent')⎕SIGNAL 99 ⋄ :EndIf
+            ⎕←'  negative: stat nonexistent OK'
+        :Case 3  ⍝ Mkdir existing directory
+            dir←_pick model.dirs
+            ok←0
+            :Trap 810 ⋄ #.SFTP.Mkdir conn(base _fullpath dir) ⋄ ok←1 ⋄ :EndTrap
+            :If ok ⋄ ('expected error: mkdir existing ',dir)⎕SIGNAL 99 ⋄ :EndIf
+            ⎕←'  negative: mkdir existing OK (',dir,')'
+        :Case 4  ⍝ Rmdir non-empty directory (find one with children)
+            found←0 ⋄ dir←'/'
+            :For dir :In model.dirs
+                children←(dir _children model.dirs~⊂dir),dir _children _fpaths model.files
+                :If 0<≢children ⋄ found←1 ⋄ :Leave ⋄ :EndIf
+            :EndFor
+            :If ~found
+                ⎕←'  negative: rmdir non-empty SKIP (no non-empty dirs)'
+            :Else
+                ok←0
+                :Trap 810 ⋄ #.SFTP.Rmdir conn(base _fullpath dir) ⋄ ok←1 ⋄ :EndTrap
+                :If ok ⋄ ('expected error: rmdir non-empty ',dir)⎕SIGNAL 99 ⋄ :EndIf
+                ⎕←'  negative: rmdir non-empty OK (',dir,')'
+            :EndIf
+        :EndSelect
+    ∇
+
     ⍝ ── Verification ───────────────────────────────────────────────
 
-    ∇ _verify(conn base model);entry;path;expected;actual;ok
+    ∇ _verify(conn base model);entry;path;expected;actual;ok;dir;listing;anames;edirs;efiles;enames;extra;missing
         ⎕←''
         ⎕←'=== Verification ==='
         ok←1
+        ⍝ Check file contents
         :For entry :In model.files
             path←0⊃entry
             expected←1⊃entry
@@ -209,12 +303,42 @@
                 ⎕←'  OK: ',path
             :EndIf
         :EndFor
+        ⍝ Check directory structure
+        :For dir :In model.dirs
+            listing←#.SFTP.List conn(base _fullpath dir)
+            anames←⊃¨listing
+            anames←(~anames∊(,'.') '..')/anames
+            edirs←dir _children model.dirs~⊂dir
+            efiles←dir _children _fpaths model.files
+            enames←edirs,efiles
+            extra←(~anames∊enames)/anames
+            missing←(~enames∊anames)/enames
+            :If (0<≢extra)∨0<≢missing
+                ⎕←'  DIR MISMATCH: ',dir
+                :If 0<≢extra ⋄ ⎕←'    orphans: ',⍕extra ⋄ :EndIf
+                :If 0<≢missing ⋄ ⎕←'    missing: ',⍕missing ⋄ :EndIf
+                ok←0
+            :Else
+                ⎕←'  DIR OK: ',dir,' (',(⍕≢anames),' entries)'
+            :EndIf
+        :EndFor
         :If ok
-            ⎕←'All ',(⍕≢model.files),' files verified.'
+            ⎕←'All ',(⍕≢model.files),' files and ',(⍕≢model.dirs),' dirs verified.'
         :EndIf
     ∇
 
     ⍝ ── Cleanup ────────────────────────────────────────────────────
+
+    ∇ _nuke(conn path);entries;names;name;sub
+        ⍝ Recursively remove remote directory tree
+        :Trap 810 ⋄ entries←#.SFTP.List conn path ⋄ :Else ⋄ :Return ⋄ :EndTrap
+        names←(~(⊃¨entries)∊(,'.') '..')/⊃¨entries
+        :For name :In names
+            sub←path,'/',name
+            :Trap 810 ⋄ #.SFTP.Delete conn sub ⋄ :Else ⋄ _nuke conn sub ⋄ :EndTrap
+        :EndFor
+        :Trap 810 ⋄ #.SFTP.Rmdir conn path ⋄ :EndTrap
+    ∇
 
     ∇ _cleanup(conn base model);sorted;entry;d
         ⍝ Delete all files

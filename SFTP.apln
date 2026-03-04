@@ -330,7 +330,7 @@
 
     ∇ Upload(conn local remote);data;tn
         tn←local ⎕NTIE 0
-        data←⎕NREAD tn 83 ⎕NSIZE tn
+        data←256|⎕NREAD tn 83(⎕NSIZE tn)
         ⎕NUNTIE tn
         Put conn data remote
     ∇
