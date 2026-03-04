@@ -1,0 +1,102 @@
+ ∇ Example;conn;listing;entry;attrs;data;names
+⍝ === SFTP Library — A Guided Tour ===
+⍝
+⍝ This function demonstrates every operation in the SFTP library.
+⍝ It connects to a server, creates files and directories, reads them
+⍝ back, and cleans up after itself.
+⍝
+⍝ To run:  ]link.import # path/to/SFTP.apln
+⍝          ]link.import # path/to/Example.aplf
+⍝          Example
+
+⍝ ── Connecting ──────────────────────────────────────────────────────
+⍝
+⍝ Two ways to connect: password or key file.
+⍝
+⍝   conn ← SFTP.ConnectWithPass 'host' 22 'user' 'password'
+⍝   conn ← SFTP.ConnectWithKey  'host' 22 'user' '/path/to/key' ''
+⍝
+⍝ Both return an opaque connection namespace. All subsequent
+⍝ operations take this as their first argument.
+
+   conn←SFTP.ConnectWithKey '89.167.123.234' 22 'root' '/tmp/aplsftp-test-key' ''
+   ⎕←'Connected.'
+
+⍝ ── Listing a directory ─────────────────────────────────────────────
+⍝
+⍝ List returns a vector of (name, attrs) pairs.
+⍝ attrs is a 7-element vector: flags filesize uid gid permissions atime mtime
+
+   listing←SFTP.List conn '/'
+   ⎕←'Root has ',(⍕≢listing),' entries: ',⍕⊃¨listing
+
+⍝ ── Stat ────────────────────────────────────────────────────────────
+⍝
+⍝ Stat returns a namespace with: flags filesize uid gid permissions atime mtime
+
+   attrs←SFTP.Stat conn '/etc/hostname'
+   ⎕←'hostname file: ',(⍕attrs.filesize),' bytes, permissions ',(⍕attrs.permissions)
+
+⍝ ── Creating a workspace ────────────────────────────────────────────
+⍝
+⍝ Mkdir creates a directory. We'll make a temporary workspace.
+
+   SFTP.Mkdir conn '/tmp/sftp-example'
+   ⎕←'Created /tmp/sftp-example'
+
+⍝ ── Writing files ───────────────────────────────────────────────────
+⍝
+⍝ Put writes data to a remote path. It accepts:
+⍝   - a character vector (automatically encoded as UTF-8)
+⍝   - a byte vector (integer 0–255, written as-is)
+⍝ Upload reads a local file and writes it to a remote path.
+
+   SFTP.Put conn 'Shakespeare wrote in APL.' '/tmp/sftp-example/claim.txt'
+   SFTP.Put conn 'Proof: 2 + 2 ←→ 4'       '/tmp/sftp-example/proof.txt'
+   ⎕←'Wrote two files.'
+
+⍝ ── Reading files back ──────────────────────────────────────────────
+⍝
+⍝ Get returns the file contents as a byte vector.
+⍝ Download writes directly to a local file.
+
+   data←SFTP.Get conn '/tmp/sftp-example/claim.txt'
+   ⎕←'Read back: ','UTF-8'⎕UCS data
+
+   SFTP.Download conn '/tmp/sftp-example/proof.txt' '/tmp/aplsftp-test/proof.txt'
+   ⎕←'Downloaded proof.txt to /tmp/aplsftp-test/'
+
+⍝ ── Listing our workspace ──────────────────────────────────────────
+
+   listing←SFTP.List conn '/tmp/sftp-example'
+   names←⊃¨listing
+   names←(~names∊(,'.') '..')/names
+   ⎕←'Our directory: ',⍕names
+
+⍝ ── Renaming ────────────────────────────────────────────────────────
+
+   SFTP.Rename conn '/tmp/sftp-example/claim.txt' '/tmp/sftp-example/retracted.txt'
+   ⎕←'Renamed claim.txt → retracted.txt'
+
+⍝ ── Verifying the rename ────────────────────────────────────────────
+
+   listing←SFTP.List conn '/tmp/sftp-example'
+   names←⊃¨listing
+   names←(~names∊(,'.') '..')/names
+   ⎕←'After rename: ',⍕names
+
+⍝ ── Cleanup ─────────────────────────────────────────────────────────
+⍝
+⍝ Delete removes a file. Rmdir removes an empty directory.
+⍝ We must remove all files before removing the directory.
+
+   SFTP.Delete conn '/tmp/sftp-example/retracted.txt'
+   SFTP.Delete conn '/tmp/sftp-example/proof.txt'
+   SFTP.Rmdir conn '/tmp/sftp-example'
+   ⎕←'Cleaned up.'
+
+⍝ ── Disconnecting ──────────────────────────────────────────────────
+
+   SFTP.Disconnect conn
+   ⎕←'Disconnected. Tour complete.'
+ ∇

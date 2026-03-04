@@ -1,0 +1,230 @@
+:Namespace GenTest
+    ⍝ Generative tester for the SFTP library.
+    ⍝ Maintains a model of the remote filesystem tree, applies random
+    ⍝ operations, and verifies the server matches the model.
+    ⍝
+    ⍝ Usage:  GenTest.Run iterations seed
+    ⍝   e.g.  GenTest.Run 50 42
+
+    ⎕IO←0
+
+    ⍝ ── Path helpers ────────────────────────────────────────────────
+    _basename←{v←,⍵ ⋄ (1+⊃⌽⍸'/'=v)↓v}
+    _dirname←{v←,⍵ ⋄ p←⊃⌽⍸'/'=v ⋄ p=0:'/' ⋄ p↑v}
+    _randname←{⎕A[?⍵⍴26]}
+    _pick←{(?≢⍵)⊃⍵}
+    _fpaths←{(0=≢⍵):⍬ ⋄ 0⊃¨⍵}  ⍝ extract paths from model.files (safe on empty)
+
+    ⍝ Children of dir d among paths ps (returns basenames)
+    ∇ r←d _children ps;mask
+        r←⍬ ⋄ →(0=≢ps)/0
+        mask←d∘≡¨_dirname¨ps
+        r←_basename¨mask/ps
+    ∇
+
+    ⍝ Full remote path from base and relative path
+    _fullpath←{⍺,(⍵≢'/')/⍵}
+
+    ⍝ ── Main entry point ───────────────────────────────────────────
+    ∇ Run(iterations seed);conn;base;model;i;op;ops;counts;fails
+        ⎕RL←seed
+        ops←'mkdir' 'put' 'get' 'list' 'stat' 'rename' 'delete' 'rmdir'
+        counts←(≢ops)⍴0
+        fails←0
+        base←'/tmp/aplsftp-fuzz-',⍕seed
+
+        conn←#.SFTP.ConnectWithKey '89.167.123.234' 22 'root' '/tmp/aplsftp-test-key' ''
+        ⎕←'Connected. Base: ',base
+
+        ⍝ Create base directory and seed the model
+        #.SFTP.Mkdir conn base
+        model←⎕NS''
+        model.dirs←,⊂'/'
+        model.files←⍬
+
+        :For i :In ⍳iterations
+            op←?≢ops
+            counts[op]+←1
+            :Trap 0
+                :Select op
+                :Case 0 ⋄ _mkdir conn base model
+                :Case 1 ⋄ _put conn base model
+                :Case 2 ⋄ _get conn base model
+                :Case 3 ⋄ _list conn base model
+                :Case 4 ⋄ _stat conn base model
+                :Case 5 ⋄ _rename conn base model
+                :Case 6 ⋄ _delete conn base model
+                :Case 7 ⋄ _rmdir conn base model
+                :EndSelect
+            :Else
+                fails+←1
+                ⎕←'  FAIL #',(⍕i),' ',(op⊃ops),': ',(⍕⎕DMX.EN),' ',⎕DMX.Message
+            :EndTrap
+        :EndFor
+
+        ⍝ Final verification: re-read every file and compare
+        _verify conn base model
+
+        ⍝ Clean up remote tree
+        _cleanup conn base model
+        #.SFTP.Disconnect conn
+
+        ⍝ Summary
+        ⎕←''
+        ⎕←'=== Summary ==='
+        ⎕←↑(ops,¨':'),¨' ',¨⍕¨counts
+        ⎕←'Failures: ',⍕fails
+    ∇
+
+    ⍝ ── Operations ─────────────────────────────────────────────────
+
+    ∇ _mkdir(conn base model);parent;name;path
+        parent←_pick model.dirs
+        name←_randname 4+?5
+        path←(('/'≡parent)↓parent),'/',name
+        #.SFTP.Mkdir conn(base,path)
+        model.dirs,←⊂path
+        ⎕←'  mkdir ',path
+    ∇
+
+    ∇ _put(conn base model);dir;name;path;data
+        dir←_pick model.dirs
+        name←(_randname 4+?5),'.dat'
+        path←(('/'≡dir)↓dir),'/',name
+        data←?(1+?999)⍴256
+        #.SFTP.Put conn data(base,path)
+        model.files,←⊂path data
+        ⎕←'  put ',path,' (',(⍕≢data),' bytes)'
+    ∇
+
+    ∇ _get(conn base model);idx;entry;path;expected;actual
+        →(0=≢model.files)/0
+        idx←?≢model.files
+        entry←idx⊃model.files
+        path←0⊃entry
+        expected←1⊃entry
+        actual←#.SFTP.Get conn(base,path)
+        :If expected≢actual
+            ⎕←'  GET MISMATCH: ',path,' expected ',(⍕≢expected),' got ',(⍕≢actual),' bytes'
+            ('get mismatch: ',path)⎕SIGNAL 99
+        :Else
+            ⎕←'  get ',path,' OK'
+        :EndIf
+    ∇
+
+    ∇ _list(conn base model);dir;actual;anames;edirs;efiles;enames
+        dir←_pick model.dirs
+        actual←#.SFTP.List conn(base _fullpath dir)
+        anames←⊃¨actual
+        anames←(~anames∊(,'.') '..')/anames
+        ⍝ Expected: children of dir in model
+        edirs←dir _children model.dirs~⊂dir
+        efiles←dir _children _fpaths model.files
+        enames←edirs,efiles
+        :If (≢enames)≠≢anames
+            ⎕←'  LIST COUNT MISMATCH in ',dir,': expected ',(⍕≢enames),' got ',⍕≢anames
+            ⎕←'    expected: ',⍕enames
+            ⎕←'    actual:   ',⍕anames
+            ('list mismatch: ',dir)⎕SIGNAL 99
+        :ElseIf (0<≢enames)∧~∧/enames∊anames
+            ⎕←'  LIST CONTENT MISMATCH in ',dir
+            ⎕←'    expected: ',⍕enames
+            ⎕←'    actual:   ',⍕anames
+            ('list mismatch: ',dir)⎕SIGNAL 99
+        :Else
+            ⎕←'  list ',dir,' OK (',(⍕≢anames),' entries)'
+        :EndIf
+    ∇
+
+    ∇ _stat(conn base model);idx;entry;path;expected_size;attrs
+        →(0=≢model.files)/0
+        idx←?≢model.files
+        entry←idx⊃model.files
+        path←0⊃entry
+        expected_size←≢1⊃entry
+        attrs←#.SFTP.Stat conn(base,path)
+        :If expected_size≠attrs.filesize
+            ⎕←'  STAT SIZE MISMATCH: ',path,' expected ',(⍕expected_size),' got ',⍕attrs.filesize
+            ('stat mismatch: ',path)⎕SIGNAL 99
+        :Else
+            ⎕←'  stat ',path,' OK (',(⍕expected_size),' bytes)'
+        :EndIf
+    ∇
+
+    ∇ _rename(conn base model);idx;entry;oldpath;dir;newname;newpath
+        →(0=≢model.files)/0
+        idx←?≢model.files
+        entry←idx⊃model.files
+        oldpath←0⊃entry
+        dir←_dirname oldpath
+        newname←(_randname 4+?5),'.dat'
+        newpath←(('/'≡dir)↓dir),'/',newname
+        #.SFTP.Rename conn(base,oldpath)(base,newpath)
+        model.files[idx]←⊂newpath(1⊃entry)
+        ⎕←'  rename ',oldpath,' → ',newpath
+    ∇
+
+    ∇ _delete(conn base model);idx;path
+        →(0=≢model.files)/0
+        idx←?≢model.files
+        path←0⊃idx⊃model.files
+        #.SFTP.Delete conn(base,path)
+        model.files←(idx≠⍳≢model.files)/model.files
+        ⎕←'  delete ',path
+    ∇
+
+    ∇ _rmdir(conn base model);candidates;empty;dir
+        ⍝ Only remove empty, non-root dirs
+        candidates←model.dirs~⊂'/'
+        →(0=≢candidates)/0
+        empty←0⍴0
+        :For dir :In candidates
+            empty,←0=≢(dir _children model.dirs~⊂dir),dir _children _fpaths model.files
+        :EndFor
+        candidates←empty/candidates
+        →(0=≢candidates)/0
+        dir←_pick candidates
+        #.SFTP.Rmdir conn(base,dir)
+        model.dirs←model.dirs~⊂dir
+        ⎕←'  rmdir ',dir
+    ∇
+
+    ⍝ ── Verification ───────────────────────────────────────────────
+
+    ∇ _verify(conn base model);entry;path;expected;actual;ok
+        ⎕←''
+        ⎕←'=== Verification ==='
+        ok←1
+        :For entry :In model.files
+            path←0⊃entry
+            expected←1⊃entry
+            actual←#.SFTP.Get conn(base,path)
+            :If expected≢actual
+                ⎕←'  FAIL: ',path
+                ok←0
+            :Else
+                ⎕←'  OK: ',path
+            :EndIf
+        :EndFor
+        :If ok
+            ⎕←'All ',(⍕≢model.files),' files verified.'
+        :EndIf
+    ∇
+
+    ⍝ ── Cleanup ────────────────────────────────────────────────────
+
+    ∇ _cleanup(conn base model);sorted
+        ⍝ Delete all files
+        :For entry :In model.files
+            :Trap 0 ⋄ #.SFTP.Delete conn(base,0⊃entry) ⋄ :EndTrap
+        :EndFor
+        ⍝ Remove dirs deepest first, skip root
+        sorted←{⍵[⍒≢¨⍵]}model.dirs~⊂'/'
+        :For d :In sorted
+            :Trap 0 ⋄ #.SFTP.Rmdir conn(base,d) ⋄ :EndTrap
+        :EndFor
+        :Trap 0 ⋄ #.SFTP.Rmdir conn base ⋄ :EndTrap
+        ⎕←'Cleaned up.'
+    ∇
+
+:EndNamespace
