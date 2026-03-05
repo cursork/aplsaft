@@ -12,7 +12,7 @@
     ⍝ ── Path helpers ────────────────────────────────────────────────
     _basename←{v←,⍵ ⋄ (1+⊃⌽⍸'/'=v)↓v}
     _dirname←{v←,⍵ ⋄ p←⊃⌽⍸'/'=v ⋄ p=0:'/' ⋄ p↑v}
-    _randname←{⎕A[?⍵⍴26]}
+    _randname←{n←⎕A[?⍵⍴26] ⋄ 0=?4:n,⎕UCS 233 ⋄ n}  ⍝ ~25%: append é
     _pick←{(?≢⍵)⊃⍵}
     _fpaths←{(0=≢⍵):⍬ ⋄ 0⊃¨⍵}  ⍝ extract paths from model.files (safe on empty)
 
@@ -74,7 +74,7 @@
         :EndWhile
 
         ⍝ Final verification: re-read every file and compare
-        _verify conn base model
+        fails+←_verify conn base model
 
         ⍝ Clean up remote tree
         _cleanup conn base model
@@ -245,17 +245,27 @@
         path←0⊃entry
         expected←1⊃entry
         localpath←'/private/tmp/aplsftp-test/gentest-tmp'
-        :Trap 0 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
+        ⍝ No pre-delete: Download now handles existing files (overwrite test)
         #.SFTP.Download conn(base,path)localpath
         tn←localpath ⎕NTIE 0
         actual←256|⎕NREAD tn 83(⎕NSIZE tn)
         ⎕NUNTIE tn
-        :Trap 0 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
         :If expected≢actual
+            {}⎕NDELETE localpath
             ⎕←'  DOWNLOAD MISMATCH: ',path,' expected ',(⍕≢expected),' got ',(⍕≢actual),' bytes'
             ('download mismatch: ',path)⎕SIGNAL 99
+        :EndIf
+        ⍝ Re-download to same path (explicitly tests overwrite)
+        #.SFTP.Download conn(base,path)localpath
+        tn←localpath ⎕NTIE 0
+        actual←256|⎕NREAD tn 83(⎕NSIZE tn)
+        ⎕NUNTIE tn
+        {}⎕NDELETE localpath
+        :If expected≢actual
+            ⎕←'  DOWNLOAD OVERWRITE MISMATCH: ',path
+            ('download overwrite mismatch: ',path)⎕SIGNAL 99
         :Else
-            ⎕←'  download ',path,' OK'
+            ⎕←'  download ',path,' OK (overwrite verified)'
         :EndIf
     ∇
 
@@ -325,10 +335,10 @@
 
     ⍝ ── Verification ───────────────────────────────────────────────
 
-    ∇ _verify(conn base model);entry;path;expected;actual;ok;dir;listing;anames;edirs;efiles;enames;extra;missing
+    ∇ nfails←_verify(conn base model);entry;path;expected;actual;dir;listing;anames;edirs;efiles;enames;extra;missing
         ⎕←''
         ⎕←'=== Verification ==='
-        ok←1
+        nfails←0
         ⍝ Check file contents
         :For entry :In model.files
             path←0⊃entry
@@ -336,7 +346,7 @@
             actual←#.SFTP.Get conn(base,path)
             :If expected≢actual
                 ⎕←'  FAIL: ',path
-                ok←0
+                nfails+←1
             :Else
                 ⎕←'  OK: ',path
             :EndIf
@@ -355,22 +365,22 @@
                 ⎕←'  DIR MISMATCH: ',dir
                 :If 0<≢extra ⋄ ⎕←'    orphans: ',⍕extra ⋄ :EndIf
                 :If 0<≢missing ⋄ ⎕←'    missing: ',⍕missing ⋄ :EndIf
-                ok←0
+                nfails+←1
             :Else
                 ⎕←'  DIR OK: ',dir,' (',(⍕≢anames),' entries)'
             :EndIf
         :EndFor
-        :If ok
+        :If nfails=0
             ⎕←'All ',(⍕≢model.files),' files and ',(⍕≢model.dirs),' dirs verified.'
         :EndIf
     ∇
 
     ⍝ ── Cleanup ────────────────────────────────────────────────────
 
-    ∇ _nuke(conn path);entries;names;name;sub
+    ∇ _nuke(conn path);entries;n;names;name;sub
         ⍝ Recursively remove remote directory tree
         :Trap 810 ⋄ entries←#.SFTP.List conn path ⋄ :Else ⋄ :Return ⋄ :EndTrap
-        names←(~(⊃¨entries)∊(,'.') '..')/⊃¨entries
+        names←(~n∊(,'.') '..')/n←⊃¨entries
         :For name :In names
             sub←path,'/',name
             :Trap 810 ⋄ #.SFTP.Delete conn sub ⋄ :Else ⋄ _nuke conn sub ⋄ :EndTrap

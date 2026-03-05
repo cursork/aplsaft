@@ -7,8 +7,8 @@ No Conga. No external APL dependencies. One file.
 ## Requirements
 
 - Dyalog APL 20.0+
-- libssh2 (`brew install libssh2`)
-- macOS arm64 (struct layouts are hardcoded for this platform)
+- libssh2 (macOS: `brew install libssh2`; Linux: system package)
+- macOS or Linux (64-bit)
 
 ## Quick start
 
@@ -97,13 +97,9 @@ All errors signal `810` with a descriptive message. Trap with `:Trap 810` or `:T
 
 The library binds ~20 libssh2 functions and 6 libc functions via `⎕NA`:
 
-- **libc** (`/usr/lib/libSystem.B.dylib`): `getaddrinfo`, `freeaddrinfo`, `socket`, `connect`, `close`, `memcpy`
-- **libssh2** (`/opt/homebrew/opt/libssh2/lib/libssh2.dylib`): session management, authentication, and SFTP operations
+- **libc**: `getaddrinfo`, `freeaddrinfo`, `socket`, `connect`, `close`, `memcpy`
+- **libssh2**: session management, authentication, and SFTP operations
 
 Connection flow: DNS resolve → TCP connect → SSH handshake → authenticate → SFTP init.
 
-All bindings are loaded lazily on first use.
-
-## Platform notes
-
-The `addrinfo` struct layout (field offsets, pointer sizes) is specific to macOS arm64. Porting to Linux or Windows would require adjusting the constants `AI_FAMILY`, `AI_ADDRLEN`, `AI_ADDR`, and `AI_SIZE` in `SFTP.apln`, and updating the library paths.
+All bindings are loaded lazily on first use. `Init` auto-detects the OS via `uname -s` and selects the correct library paths and `addrinfo` struct offsets for macOS (BSD) or Linux (POSIX).
