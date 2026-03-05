@@ -1,0 +1,1833 @@
+:Class SSHClient
+⍝ SSH-2 client using Dyalog Conga for TCP transport
+⍝ Implements the SSH-2 protocol (RFC 4251-4254) over raw TCP
+
+    ⎕ML←⎕IO←1
+
+    ∇ r←Version
+    ⍝ Return the current version
+      :Access public shared
+      r←'SSHClient' '0.1.0' '2026-03-04'
+    ∇
+
+⍝ Connection fields
+    :field public Host←''                          ⍝ SSH server hostname or IP
+    :field public Port←22                          ⍝ SSH server port (default 22)
+    :field public Username←''                      ⍝ username for authentication
+    :field public Password←''                      ⍝ password for password auth
+    :field public KeyFile←''                       ⍝ path to private key file (PEM) for pubkey auth
+    :field public KnownHostsFile←''               ⍝ path to known_hosts file for host verification
+
+⍝ Conga-related fields
+    :field public BufferSize←200000                ⍝ Conga buffer size
+    :field public WaitTime←5000                    ⍝ timeout in ms on Conga Wait calls
+    :field public Timeout←30                       ⍝ seconds before overall operation times out
+    :field public shared LDRC                      ⍝ reference to Conga LIB instance after init
+    :field public shared CongaPath←''             ⍝ path to Conga workspace
+    :field public shared CongaRef←''              ⍝ user-supplied reference to Conga
+    :field public shared CongaVersion←''          ⍝ Conga [major minor build]
+
+⍝ Operational fields
+    :field public shared Debug←0                   ⍝ bitmask: +1=no trapping +2=stop on connect +4=packet +8=crypto
+
+⍝ Internal state
+    :field Client←''                               ⍝ Conga client ID
+    :field ServerBanner←''                         ⍝ server version string from SSH banner
+    :field SessionID←''                            ⍝ session ID (hash from key exchange)
+    :field Authenticated←0                         ⍝ 1 if successfully authenticated
+    :field ChannelID←¯1                            ⍝ current channel number
+    :field RemoteChannelID←¯1                      ⍝ remote channel number from server
+    :field RemoteWindowSize←0                      ⍝ remote initial window size
+
+⍝ Crypto state (initialised after NEWKEYS)
+    :field CryptoActive←0                            ⍝ 1 after NEWKEYS exchange
+    :field SeqSend←0                                 ⍝ client→server packet sequence number
+    :field SeqRecv←0                                 ⍝ server→client packet sequence number
+    :field AesCtxSend←⍬                              ⍝ AES-128 context for sending
+    :field AesCtxRecv←⍬                              ⍝ AES-128 context for receiving
+    :field CtrSend←⍬                                 ⍝ AES-CTR counter for sending
+    :field CtrRecv←⍬                                 ⍝ AES-CTR counter for receiving
+    :field MacKeySend←⍬                              ⍝ HMAC-SHA-256 key for sending
+    :field MacKeyRecv←⍬                              ⍝ HMAC-SHA-256 key for receiving
+
+⍝ SFTP state
+    :field SFTPActive←0                              ⍝ 1 when SFTP subsystem is active
+    :field SFTPChanID←¯1                             ⍝ local channel ID for SFTP
+    :field SFTPRemoteChan←¯1                         ⍝ remote channel ID for SFTP
+    :field SFTPRemoteWin←0                           ⍝ remote window size for SFTP send
+    :field SFTPReqID←0                               ⍝ SFTP request ID counter
+    :field SFTPBuf←⍬                                 ⍝ buffered SFTP data from channel
+    :field SFTPRecvBuf←⍬                             ⍝ SSH-level receive buffer for SFTP
+    :field SFTPReceived←0                            ⍝ bytes received for window management
+
+⍝ SSH-2 message type constants (RFC 4250)
+    :field public readonly shared MSG_DISCONNECT←1
+    :field public readonly shared MSG_IGNORE←2
+    :field public readonly shared MSG_DEBUG←4
+    :field public readonly shared MSG_SERVICE_REQUEST←5
+    :field public readonly shared MSG_SERVICE_ACCEPT←6
+    :field public readonly shared MSG_KEXINIT←20
+    :field public readonly shared MSG_NEWKEYS←21
+    :field public readonly shared MSG_KEXDH_INIT←30
+    :field public readonly shared MSG_KEXDH_REPLY←31
+    :field public readonly shared MSG_USERAUTH_REQUEST←50
+    :field public readonly shared MSG_USERAUTH_FAILURE←51
+    :field public readonly shared MSG_USERAUTH_SUCCESS←52
+    :field public readonly shared MSG_CHANNEL_OPEN←90
+    :field public readonly shared MSG_CHANNEL_OPEN_CONFIRMATION←91
+    :field public readonly shared MSG_CHANNEL_OPEN_FAILURE←92
+    :field public readonly shared MSG_CHANNEL_WINDOW_ADJUST←93
+    :field public readonly shared MSG_CHANNEL_DATA←94
+    :field public readonly shared MSG_CHANNEL_EOF←96
+    :field public readonly shared MSG_CHANNEL_CLOSE←97
+    :field public readonly shared MSG_CHANNEL_REQUEST←98
+    :field public readonly shared MSG_USERAUTH_PK_OK←60
+    :field public readonly shared MSG_USERAUTH_BANNER←53
+    :field public readonly shared MSG_CHANNEL_SUCCESS←99
+    :field public readonly shared MSG_CHANNEL_FAILURE←100
+    :field public readonly shared MSG_GLOBAL_REQUEST←80
+    :field public readonly shared MSG_REQUEST_FAILURE←82
+
+⍝ SFTP packet types (SSH File Transfer Protocol v3)
+    :field public readonly shared FXP_INIT←1
+    :field public readonly shared FXP_VERSION←2
+    :field public readonly shared FXP_OPEN←3
+    :field public readonly shared FXP_CLOSE←4
+    :field public readonly shared FXP_READ←5
+    :field public readonly shared FXP_WRITE←6
+    :field public readonly shared FXP_FSTAT←8
+    :field public readonly shared FXP_STATUS←101
+    :field public readonly shared FXP_HANDLE←102
+    :field public readonly shared FXP_DATA←103
+    :field public readonly shared FXP_LSTAT←7
+    :field public readonly shared FXP_OPENDIR←11
+    :field public readonly shared FXP_READDIR←12
+    :field public readonly shared FXP_STAT←17
+    :field public readonly shared FXP_ATTRS←105
+    :field public readonly shared FXP_NAME←104
+
+⍝ SFTP open flags
+    :field public readonly shared FXF_READ←1
+    :field public readonly shared FXF_WRITE←2
+    :field public readonly shared FXF_CREAT←8
+    :field public readonly shared FXF_TRUNC←16
+
+⍝ SFTP status codes
+    :field public readonly shared FX_OK←0
+    :field public readonly shared FX_EOF←1
+
+    ∇ make
+    ⍝ No-argument constructor
+      :Access public
+      :Implements constructor
+    ∇
+
+    ∇ make1 args
+    ⍝ Constructor with connection arguments
+    ⍝ args - [Host [Port [Username [Password]]]]
+      :Access public
+      :Implements constructor
+      →0⍴⍨0∊⍴args
+      args←,⊆args
+      :If 2=⌊nameClass⊃args ⍝ array of positional arguments
+          (Host Port Username Password)←4↑args,(-4-≢args)↑Host Port Username Password
+      :ElseIf 9.1=nameClass⊃args ⍝ namespace of named settings
+          args{⍎⍵,'←⍺⍎⍵'}¨(⊃args).⎕NL ¯2.1
+      :Else
+          'Invalid constructor argument'⎕SIGNAL 11
+      :EndIf
+    ∇
+
+    ∇ Goodbye
+      :Implements destructor
+      {}{0::⍬ ⋄ Close⍬}⍣(~0∊⍴Client)⊢''
+    ∇
+
+    ∇ {ns}←initResult ns
+    ⍝ Initialise the standard result namespace
+      :Access shared
+      ns.(Host Port Username rc msg Data Elapsed)←'' 22 '' ¯1 '' '' 0
+    ∇
+
+    ∇ {r}←setDisplayFormat r;rc;msg;host;data
+    ⍝ Set ⎕DF on a result namespace for readable display
+      :If 9.1=nameClass r
+          rc←'rc: ',⍕r.rc
+          msg←' | msg: ',⍕r.msg
+          host←' | host: ',(⍕r.Host),':',(⍕r.Port)
+          data←' | ',{'≢Data: ',(⍕≢⍵),(9.1=nameClass ⍵)/' (namespace)'}r.Data
+          r.⎕DF 1⌽'][',rc,msg,host,data
+      :EndIf
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  Public API
+⍝ ────────────────────────────────────────────────
+
+    ∇ r←Connect
+    ⍝ Open a TCP connection to the SSH server and complete the SSH handshake + authentication
+    ⍝ Returns a result namespace with rc=0 on success
+      :Access public
+      r←initResult ⎕NS''
+      r.(Host Port Username)←Host Port Username
+      :Trap (dbg 1)↓0
+          →∆END↓⍨0∊⍴(Initialize r).msg  ⍝ ensure Conga is ready
+          r←SSHConnect r
+      :Else
+          r.(rc msg)←¯1('Unexpected ',⊃{⍺,' at ',⍵}/2↑⎕DMX.DM)
+      :EndTrap
+     ∆END:
+      setDisplayFormat r
+    ∇
+
+    ∇ r←Exec cmd
+    ⍝ Execute a shell command on the remote host over an SSH session-channel
+    ⍝ cmd  - character vector command string
+    ⍝ Returns result namespace; r.Data contains stdout of the command
+      :Access public
+      r←initResult ⎕NS''
+      :If 0∊⍴Client
+          r.(rc msg)←¯1 'Not connected – call Connect first'
+          →0
+      :EndIf
+      :Trap (dbg 1)↓0
+          r←cmd SSHExec r
+      :Else
+          r.(rc msg)←¯1('Unexpected ',⊃{⍺,' at ',⍵}/2↑⎕DMX.DM)
+      :EndTrap
+      setDisplayFormat r
+    ∇
+
+    ∇ r←{opts}GetFile args;remotePath;localPath;handle;offset;data;chunk;sftpMsg;rest;code;id;dummy;tn;msgText;done
+    ⍝ SFTP download – transfer a file from the remote host
+    ⍝ args    - (RemotePath LocalPath) or just RemotePath (saves to current directory)
+    ⍝ opts    - optional namespace of options
+      :Access public
+      :If 0=⎕NC'opts' ⋄ opts←⎕NS'' ⋄ :EndIf
+      r←initResult ⎕NS''
+      :If 0∊⍴Client
+          r.(rc msg)←¯1 'Not connected – call Connect first' ⋄ →0
+      :EndIf
+      :Trap (dbg 1)↓0
+          args←,⊆args
+          remotePath←⊃args
+          :If 1<≢args ⋄ localPath←2⊃args
+          :Else ⋄ localPath←⊃⌽'/'(≠⊆⊢)remotePath
+          :EndIf
+
+          ⍝ Open SFTP session
+          →0↓⍨0∊⍴(SFTPOpenSession r).msg
+
+          ⍝ Open remote file for reading
+          id←NextSFTPID
+          {}SFTPSend∊((,FXP_OPEN),(EncodeUint32 id)
+                     (EncodeString remotePath)
+                     (EncodeUint32 FXF_READ)
+                     (EncodeUint32 0))
+          sftpMsg←SFTPRecv
+          :If FXP_STATUS=⊃sftpMsg
+              rest←1↓sftpMsg
+              (dummy rest)←DecodeUint32 rest
+              (code rest)←DecodeUint32 rest
+              (msgText rest)←DecodeString rest
+              r.(rc msg)←¯1('SFTP open failed: ',msgText)
+              SFTPCloseSession ⋄ →0
+          :ElseIf FXP_HANDLE≠⊃sftpMsg
+              r.(rc msg)←¯1('Expected FXP_HANDLE, got type ',⍕⊃sftpMsg)
+              SFTPCloseSession ⋄ →0
+          :EndIf
+          rest←1↓sftpMsg
+          (dummy rest)←DecodeUint32 rest
+          (handle rest)←DecodeStringRaw rest
+
+          ⍝ Read file data in chunks
+          offset←0 ⋄ data←⍬ ⋄ done←0
+          :While ~done
+              id←NextSFTPID
+              {}SFTPSend∊((,FXP_READ),(EncodeUint32 id)
+                         (EncodeStringBytes handle)
+                         (EncodeUint64 offset)
+                         (EncodeUint32 30000))
+              sftpMsg←SFTPRecv
+              :If FXP_DATA=⊃sftpMsg
+                  rest←1↓sftpMsg
+                  (dummy rest)←DecodeUint32 rest
+                  (chunk rest)←DecodeStringRaw rest
+                  data,←chunk
+                  offset+←≢chunk
+              :ElseIf FXP_STATUS=⊃sftpMsg
+                  rest←1↓sftpMsg
+                  (dummy rest)←DecodeUint32 rest
+                  (code rest)←DecodeUint32 rest
+                  :If FX_EOF=code
+                      done←1
+                  :Else
+                      (msgText rest)←DecodeString rest
+                      r.(rc msg)←¯1('SFTP read error: ',msgText)
+                      {}SFTPSend∊(,FXP_CLOSE),(EncodeUint32 NextSFTPID),(EncodeStringBytes handle)
+                      {}SFTPRecv
+                      SFTPCloseSession ⋄ →0
+                  :EndIf
+              :EndIf
+          :EndWhile
+
+          ⍝ Close remote file handle
+          {}SFTPSend∊(,FXP_CLOSE),(EncodeUint32 NextSFTPID),(EncodeStringBytes handle)
+          {}SFTPRecv
+
+          ⍝ Close SFTP session
+          SFTPCloseSession
+
+          ⍝ Write to local file
+          :If ⎕NEXISTS localPath ⋄ tn←localPath ⎕NTIE 0 ⋄ 0 ⎕NRESIZE tn
+          :Else ⋄ tn←localPath ⎕NCREATE 0
+          :EndIf
+          (⎕UCS data) ⎕NAPPEND tn 80
+          ⎕NUNTIE tn
+
+          r.(rc msg Data)←0 '' localPath
+      :Else
+          r.(rc msg)←¯1('Unexpected ',⊃{⍺,' at ',⍵}/2↑⎕DMX.DM)
+      :EndTrap
+      setDisplayFormat r
+    ∇
+
+    ∇ r←{opts}PutFile args;localPath;remotePath;handle;offset;data;chunk;sftpMsg;rest;code;id;dummy;tn;msgText;chunkSize
+    ⍝ SFTP upload – transfer a file to the remote host
+    ⍝ args    - (LocalPath RemotePath) or just LocalPath (uses basename on remote)
+    ⍝ opts    - optional namespace of options
+      :Access public
+      :If 0=⎕NC'opts' ⋄ opts←⎕NS'' ⋄ :EndIf
+      r←initResult ⎕NS''
+      :If 0∊⍴Client
+          r.(rc msg)←¯1 'Not connected – call Connect first' ⋄ →0
+      :EndIf
+      :Trap (dbg 1)↓0
+          args←,⊆args
+          localPath←⊃args
+          :If 1<≢args ⋄ remotePath←2⊃args
+          :Else ⋄ remotePath←⊃⌽'/'(≠⊆⊢)localPath
+          :EndIf
+
+          ⍝ Read local file
+          :If ~⎕NEXISTS localPath
+              r.(rc msg)←¯1('Local file not found: ',localPath) ⋄ →0
+          :EndIf
+          tn←localPath ⎕NTIE 0
+          data←⎕UCS ⎕NREAD tn 80(⎕NSIZE tn)0
+          ⎕NUNTIE tn
+          :If dbg 4
+              ⎕←'DBG PutFile: data DR=',(⍕⎕DR data),' shape=',(⍕⍴data),' depth=',⍕≡data
+              ⎕←'DBG PutFile: first 20 values=',⍕20↑data
+              ⎕←'DBG PutFile: type of ⊃data = ',⍕⎕DR⊃data
+          :EndIf
+
+          ⍝ Open SFTP session
+          →0↓⍨0∊⍴(SFTPOpenSession r).msg
+
+          ⍝ Open remote file for writing (create + truncate)
+          id←NextSFTPID
+          {}SFTPSend∊((,FXP_OPEN),(EncodeUint32 id)
+                     (EncodeString remotePath)
+                     (EncodeUint32 FXF_WRITE+FXF_CREAT+FXF_TRUNC)
+                     (EncodeUint32 0))
+          sftpMsg←SFTPRecv
+          :If FXP_STATUS=⊃sftpMsg
+              rest←1↓sftpMsg
+              (dummy rest)←DecodeUint32 rest
+              (code rest)←DecodeUint32 rest
+              (msgText rest)←DecodeString rest
+              r.(rc msg)←¯1('SFTP open for write failed: ',msgText)
+              SFTPCloseSession ⋄ →0
+          :ElseIf FXP_HANDLE≠⊃sftpMsg
+              r.(rc msg)←¯1('Expected FXP_HANDLE, got type ',⍕⊃sftpMsg)
+              SFTPCloseSession ⋄ →0
+          :EndIf
+          rest←1↓sftpMsg
+          (dummy rest)←DecodeUint32 rest
+          (handle rest)←DecodeStringRaw rest
+
+          ⍝ Write data in chunks
+          offset←0 ⋄ chunkSize←30000
+          :While offset<≢data
+              chunk←chunkSize⌊(≢data)-offset
+              id←NextSFTPID
+              {}SFTPSend∊((,FXP_WRITE),(EncodeUint32 id)
+                         (EncodeStringBytes handle)
+                         (EncodeUint64 offset)
+                         (EncodeStringBytes chunk↑offset↓data))
+              sftpMsg←SFTPRecv
+              :If FXP_STATUS≠⊃sftpMsg
+                  r.(rc msg)←¯1('Expected FXP_STATUS for write, got type ',⍕⊃sftpMsg)
+                  {}SFTPSend∊(,FXP_CLOSE),(EncodeUint32 NextSFTPID),(EncodeStringBytes handle)
+                  {}SFTPRecv
+                  SFTPCloseSession ⋄ →0
+              :EndIf
+              rest←1↓sftpMsg
+              (dummy rest)←DecodeUint32 rest
+              (code rest)←DecodeUint32 rest
+              :If FX_OK≠code
+                  (msgText rest)←DecodeString rest
+                  r.(rc msg)←¯1('SFTP write error: ',msgText)
+                  {}SFTPSend∊(,FXP_CLOSE),(EncodeUint32 NextSFTPID),(EncodeStringBytes handle)
+                  {}SFTPRecv
+                  SFTPCloseSession ⋄ →0
+              :EndIf
+              offset+←chunk
+          :EndWhile
+
+          ⍝ Close remote file handle
+          {}SFTPSend∊(,FXP_CLOSE),(EncodeUint32 NextSFTPID),(EncodeStringBytes handle)
+          {}SFTPRecv
+
+          ⍝ Close SFTP session
+          SFTPCloseSession
+
+          r.(rc msg Data)←0 '' remotePath
+      :Else
+          r.(rc msg)←¯1('Unexpected ',⊃{⍺,' at ',⍵}/2↑⎕DMX.DM)
+      :EndTrap
+      setDisplayFormat r
+    ∇
+
+    ∇ r←ListDir path;handle;sftpMsg;rest;code;id;dummy;msgText;entries;count;i;fname;lname;attrs;entry
+    ⍝ SFTP directory listing
+    ⍝ path    - remote directory path
+    ⍝ Returns result namespace; r.Data is a vector of namespaces (name longname size permissions mtime …)
+      :Access public
+      r←initResult ⎕NS''
+      :If 0∊⍴Client
+          r.(rc msg)←¯1 'Not connected – call Connect first' ⋄ →0
+      :EndIf
+      :Trap (dbg 1)↓0
+          ⍝ Open SFTP session
+          →0↓⍨0∊⍴(SFTPOpenSession r).msg
+
+          ⍝ Open directory
+          id←NextSFTPID
+          {}SFTPSend∊((,FXP_OPENDIR),(EncodeUint32 id),(EncodeString path))
+          sftpMsg←SFTPRecv
+          :If FXP_STATUS=⊃sftpMsg
+              rest←1↓sftpMsg
+              (dummy rest)←DecodeUint32 rest
+              (code rest)←DecodeUint32 rest
+              (msgText rest)←DecodeString rest
+              r.(rc msg)←¯1('SFTP opendir failed: ',msgText)
+              SFTPCloseSession ⋄ →0
+          :ElseIf FXP_HANDLE≠⊃sftpMsg
+              r.(rc msg)←¯1('Expected FXP_HANDLE, got type ',⍕⊃sftpMsg)
+              SFTPCloseSession ⋄ →0
+          :EndIf
+          rest←1↓sftpMsg
+          (dummy rest)←DecodeUint32 rest
+          (handle rest)←DecodeStringRaw rest
+
+          ⍝ Read directory entries
+          entries←⍬
+          :While 1
+              id←NextSFTPID
+              {}SFTPSend∊((,FXP_READDIR),(EncodeUint32 id),(EncodeStringBytes handle))
+              sftpMsg←SFTPRecv
+              :If FXP_NAME=⊃sftpMsg
+                  rest←1↓sftpMsg
+                  (dummy rest)←DecodeUint32 rest   ⍝ request id
+                  (count rest)←DecodeUint32 rest
+                  :For i :In ⍳count
+                      (fname rest)←DecodeString rest
+                      (lname rest)←DecodeString rest
+                      (attrs rest)←DecodeAttrs rest
+                      entry←⎕NS''
+                      entry.name←fname
+                      entry.longname←lname
+                      entry.(size uid gid permissions atime mtime)←attrs.(size uid gid permissions atime mtime)
+                      entries,←entry
+                  :EndFor
+              :ElseIf FXP_STATUS=⊃sftpMsg
+                  rest←1↓sftpMsg
+                  (dummy rest)←DecodeUint32 rest
+                  (code rest)←DecodeUint32 rest
+                  :If FX_EOF=code
+                      :Leave
+                  :Else
+                      (msgText rest)←DecodeString rest
+                      r.(rc msg)←¯1('SFTP readdir error: ',msgText)
+                      {}SFTPSend∊(,FXP_CLOSE),(EncodeUint32 NextSFTPID),(EncodeStringBytes handle)
+                      {}SFTPRecv
+                      SFTPCloseSession ⋄ →0
+                  :EndIf
+              :EndIf
+          :EndWhile
+
+          ⍝ Close directory handle
+          {}SFTPSend∊(,FXP_CLOSE),(EncodeUint32 NextSFTPID),(EncodeStringBytes handle)
+          {}SFTPRecv
+
+          ⍝ Close SFTP session
+          SFTPCloseSession
+
+          r.(rc msg Data)←0 '' entries
+      :Else
+          r.(rc msg)←¯1('Unexpected ',⊃{⍺,' at ',⍵}/2↑⎕DMX.DM)
+      :EndTrap
+      setDisplayFormat r
+    ∇
+
+    ∇ r←Stat path;sftpMsg;rest;code;id;dummy;msgText;attrs
+    ⍝ SFTP stat – get file/directory attributes
+    ⍝ path    - remote file or directory path
+    ⍝ Returns result namespace; r.Data is a namespace with size uid gid permissions atime mtime
+      :Access public
+      r←initResult ⎕NS''
+      :If 0∊⍴Client
+          r.(rc msg)←¯1 'Not connected – call Connect first' ⋄ →0
+      :EndIf
+      :Trap (dbg 1)↓0
+          ⍝ Open SFTP session
+          →0↓⍨0∊⍴(SFTPOpenSession r).msg
+
+          ⍝ Send FXP_STAT
+          id←NextSFTPID
+          {}SFTPSend∊((,FXP_STAT),(EncodeUint32 id),(EncodeString path))
+          sftpMsg←SFTPRecv
+          :If FXP_ATTRS=⊃sftpMsg
+              rest←1↓sftpMsg
+              (dummy rest)←DecodeUint32 rest   ⍝ request id
+              (attrs rest)←DecodeAttrs rest
+              r.(rc msg Data)←0 '' attrs
+          :ElseIf FXP_STATUS=⊃sftpMsg
+              rest←1↓sftpMsg
+              (dummy rest)←DecodeUint32 rest
+              (code rest)←DecodeUint32 rest
+              (msgText rest)←DecodeString rest
+              r.(rc msg)←¯1('SFTP stat failed: ',msgText)
+          :Else
+              r.(rc msg)←¯1('Expected FXP_ATTRS, got type ',⍕⊃sftpMsg)
+          :EndIf
+
+          ⍝ Close SFTP session
+          SFTPCloseSession
+      :Else
+          r.(rc msg)←¯1('Unexpected ',⊃{⍺,' at ',⍵}/2↑⎕DMX.DM)
+      :EndTrap
+      setDisplayFormat r
+    ∇
+
+    ∇ r←Close
+    ⍝ Send SSH_MSG_DISCONNECT then close the Conga client
+    ⍝ Returns result namespace with rc=0 on success
+      :Access public
+      r←initResult ⎕NS''
+      r.(Host Port Username)←Host Port Username
+      :If 0∊⍴Client
+          r.(rc msg)←0 'Already disconnected'
+          setDisplayFormat r ⋄ →0
+      :EndIf
+      :If SFTPActive ⋄ SFTPCloseSession ⋄ :EndIf
+      r.msg←'Disconnected'
+      :Trap 0
+          {}SendPacket SSHDisconnectPacket 11 'Connection closed by client' ⍝ 11 = BY_APPLICATION
+      :Else
+          r.msg←'Disconnected (disconnect packet failed: ',⎕DMX.EM,')'
+      :EndTrap
+      :Trap 0
+          {}LDRC.Close Client
+      :Else
+          r.msg,←' (close failed: ',⎕DMX.EM,')'
+      :EndTrap
+      Client←''
+      Authenticated←0
+      ChannelID←¯1
+      RemoteChannelID←¯1
+      r.rc←0
+      setDisplayFormat r
+    ∇
+
+    ∇ r←Config
+    ⍝ Return current configuration as a matrix of name/value pairs
+      :Access public
+      r←↑{6::⍵'not set' ⋄ ⍵(⍎⍵)}¨⎕THIS.⎕NL ¯2.2
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  Shared convenience methods (call without instance)
+⍝ ────────────────────────────────────────────────
+
+    ∇ r←New args
+    ⍝ Create a new SSHClient instance
+    ⍝ args - same as constructor args
+      :Access public shared
+      r←''
+      :Trap (dbg 1)↓0
+          r←##.⎕NEW(⊃⊃⎕CLASS ⎕THIS)(,⊆args)
+      :Else
+          r←initResult ⎕NS''
+          r.(rc msg)←¯1 ⎕DMX.EM
+      :EndTrap
+    ∇
+
+    ∇ r←Do args
+    ⍝ Create instance, connect, run a command, and close – all in one call
+    ⍝ args - (Host Command) | (Host Username Password Command) | namespace
+      :Access public shared
+      r←initResult ⎕NS''
+      :Trap (dbg 1)↓0
+          :If 9.1=nameClass⊃,⊆args
+              r←New⊃,⊆args
+          :Else
+              args←,⊆args
+              r←New(2↑args)   ⍝ Host and (optional) Port
+              :If 9.1≠nameClass r
+                  r.Username Password←2↑2↓args  ⍝ Username Password
+              :EndIf
+          :EndIf
+          →0⍴⍨9.1≠nameClass r ⍝ bail if New returned an error namespace
+          :If 0≠(r.Connect).rc ⋄ →0 ⋄ :EndIf
+          r←r.Exec⊃¯1↑,⊆args ⍝ last element is the command
+          r.Close
+      :Else
+          r.(rc msg)←¯1 ⎕DMX.EM
+      :EndTrap
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  Conga initialisation  (adapted from HttpCommand)
+⍝ ────────────────────────────────────────────────
+
+    ∇ r←Init
+    ⍝ Explicitly initialise Conga; returns (rc msg)
+      :Access public
+      r←(Initialize initResult ⎕NS'').(rc msg)
+      r[1]×←~0∊⍴2⊃r
+    ∇
+
+    ∇ r←Initialize r;ref;root;nc;n;ns;copied;class;path
+    ⍝ Ensure LDRC is a live Conga reference
+      r.msg←''
+      :Hold 'SSHClientInit'
+          :If {6 16 999::1 ⋄ ''≡LDRC:1 ⋄ 0⊣LDRC.Describe'.'}''
+              LDRC←''
+              :If ~0∊⍴CongaRef
+                  :If 0∊⍴LDRC←r ResolveCongaRef CongaRef
+                      r.msg,⍨←'Could not initialise Conga using CongaRef "',(⍕CongaRef),'" due to '
+                      →∆END
+                  :EndIf
+              :Else
+                  :For root :In ## #
+                      ref nc←root{1↑¨⍵{(×⍵)∘/¨⍺ ⍵}⍺.⎕NC ⍵}ns←'Conga' 'DRC'
+                      :If 9=⊃⌊nc ⋄ :Leave ⋄ :EndIf
+                  :EndFor
+                  :If 9=⊃⌊nc
+                      :If 0∊⍴LDRC←r ResolveCongaRef(root⍎∊ref)
+                          →∆END⊣r.msg,⍨←'Could not initialise Conga from "',(∊(⍕root)'.'ref),'" due to '
+                      :EndIf
+                      →∆COPY↓⍨{999::0 ⋄ 1⊣LDRC.Describe'.'}''
+                  :Else
+     ∆COPY:
+                      class←⊃⊃⎕CLASS ⎕THIS
+                      :If ~0∊⍴CongaPath
+                          CongaPath←∊1 ⎕NPARTS CongaPath,'/'
+                          →∆END↓⍨0∊⍴r.msg←(~⎕NEXISTS CongaPath)/'CongaPath "',CongaPath,'" does not exist'
+                      :EndIf
+                      copied←0
+                      :For n :In ns
+                          :For path :In (1+0∊⍴CongaPath)⊃(⊂CongaPath)((dyalogRoot,'ws/')'')
+                              :Trap (dbg 1)↓0
+                                  n class.⎕CY path,'conga'
+                                  LDRC←r ResolveCongaRef(class⍎n)
+                                  :If 0∊⍴LDRC
+                                      r.msg,⍨←n,' was copied from "',path,'conga", but encountered '
+                                      →∆END
+                                  :EndIf
+                                  →∆COPIED⊣copied←1
+                              :EndTrap
+                          :EndFor
+                      :EndFor
+                      →∆END↓⍨0∊⍴r.msg←(~copied)/'neither Conga nor DRC were successfully copied'
+     ∆COPIED:
+                  :EndIf
+              :EndIf
+          :EndIf
+          CongaVersion←LDRC.Version
+          :If 0≠⊃LDRC.SetProp'.' 'EventMode' 1
+              r.msg←'Unable to set EventMode on Conga root'
+          :EndIf
+     ∆END:
+      :EndHold
+    ∇
+
+    ∇ LDRC←r ResolveCongaRef CongaRef;failed;z
+    ⍝ Resolve CongaRef to a live Conga LIB reference
+      LDRC←'' ⋄ failed←0
+      :Select nameClass CongaRef
+      :Case 9.1 ⍝ namespace (DRC or Conga)
+     ∆TRY:
+          :Trap (dbg 1)↓0
+              :If 2 3≢⌊CongaRef.⎕NC'DllVer' 'Init'
+                  r.msg←'does not refer to a valid Conga interface'
+                  →∆EXIT⊣LDRC←''
+              :EndIf
+              :If ∨/'.Conga'⍷⍕CongaRef
+                  LDRC←CongaPath CongaRef.Init'SSHClient'
+              :ElseIf 0≡⊃CongaRef.Init CongaPath
+                  LDRC←CongaRef
+              :Else
+                  r.msg←'does not refer to a valid Conga interface'
+                  →∆EXIT⊣LDRC←''
+              :End
+          :Else
+              :If failed
+                  →∆EXIT⊣LDRC←''⊣r.msg←∊{⍺,(~0∊⍴⍵)/': ',⍵}/⎕DMX.(EM Message)
+              :Else
+                  →∆TRY⊣failed←1
+              :EndIf
+          :EndTrap
+      :Case 9.2 ⍝ already an initialised instance
+          :If 3=⌊|CongaRef.⎕NC⊂'Clt'
+              LDRC←CongaRef
+          :EndIf
+      :Case 2.1 ⍝ character name
+          :Trap (dbg 1)↓0
+              :If 9≠z←⎕NC⍕CongaRef
+                  →∆EXIT⊣r.msg←'CongaRef ',(1+z=0)⊃'is invalid' 'was not found'
+              :EndIf
+              LDRC←r ResolveCongaRef(⍎∊⍕CongaRef)
+          :Else
+              r.msg←∊{⍺,(~0∊⍴⍵)/': ',⍵}/⎕DMX.(EM Message)
+          :EndTrap
+      :EndSelect
+     ∆EXIT:
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  Internal SSH protocol methods
+⍝ ────────────────────────────────────────────────
+
+    ∇ r←SSHConnect r;err;rc;starttime;donetime
+    ⍝ Open TCP connection then drive the SSH-2 handshake and authentication
+      starttime←⎕AI[3]
+      donetime←⌊starttime+1000×|Timeout
+
+      ⍝ ── Step 1: open raw TCP connection ──────────────────────────────
+      :If 0∊⍴Client
+          stopIf dbg 2
+          :If 0≠⊃(err Client)←2↑LDRC.Clt''(⍕Host)Port'raw'BufferSize
+              Client←''
+              →∆END⊣r.(rc msg)←err('TCP connect to ',(⍕Host),':',(⍕Port),' failed')
+          :EndIf
+      :EndIf
+
+      ⍝ ── Step 2: SSH banner exchange ─────────────────────────────────
+      ⍝ RFC 4253 §4.2  – send our identification string, read server's
+      →∆END↓⍨0∊⍴r.msg←(SSHBannerExchange r).msg
+
+      ⍝ ── Step 3: key exchange (KEX) ───────────────────────────────────
+      ⍝ RFC 4253 §6-9  – negotiate algorithms, perform DH key exchange
+      →∆END↓⍨0∊⍴r.msg←(SSHKeyExchange r).msg
+
+      ⍝ ── Step 4: request 'ssh-userauth' service ───────────────────────
+      ⍝ RFC 4252 §5
+      →∆END↓⍨0∊⍴r.msg←(SSHServiceRequest 'ssh-userauth').msg
+
+      ⍝ ── Step 5: user authentication ──────────────────────────────────
+      →∆END↓⍨0∊⍴r.msg←(SSHAuthenticate r).msg
+
+      r.Elapsed←⎕AI[3]-starttime
+      r.rc←0
+     ∆END:
+    ∇
+
+    ∇ r←SSHBannerExchange r;rc;obj;evt;data;buf;lines;banner
+    ⍝ RFC 4253 §4.2  Exchange identification strings
+    ⍝ Client sends:  SSH-2.0-DyalogSSHClient_0.1\r\n
+    ⍝ Server sends:  SSH-2.0-<server-version>\r\n
+      ⍝ 1. Send client identification string
+      :If 0≠⊃LDRC.Send Client('SSH-2.0-DyalogSSHClient_0.1',⎕UCS 13 10)
+          r.(rc msg)←¯1 'Failed to send SSH client banner'
+          →0
+      :EndIf
+      ⍝ 2. Accumulate received data until the server banner line arrives
+      ⍝    Server MAY send informational lines before 'SSH-2.0-' (RFC 4253 §4.2)
+      buf←''
+      :Repeat
+          (rc obj evt data)←4↑LDRC.Wait Client
+          :If 0≠rc
+              r.(rc msg)←rc 'Timeout or error waiting for SSH server banner'
+              →0
+          :EndIf
+          :If evt≡'Block' ⋄ buf,←⎕UCS data ⋄ :EndIf
+      :Until ∨/'SSH-2.0-'⍷buf
+      ⍝ 3. Extract the banner line (first line starting with 'SSH-2.0-')
+      lines←(⎕UCS 10)(≠⊆⊢)buf
+      banner←⊃({⊃'SSH-2.0-'⍷⍵}¨lines)/lines
+      ⍝ 4. Strip trailing CR and save
+      ServerBanner←banner~(⎕UCS 13)
+      r.msg←''
+    ∇
+
+    ∇ r←SSHKeyExchange r;p;g;x;e;f;K;KS;sigH;V_C;V_S;I_C;I_S;H;⎕FR;k;⎕RL;⎕DCT;b
+                       ;cookie;kexPayload;payload;rest;buf;fh;ekc;eks
+                       ;ksBytes;ksRest;keyAlgo;keyE;keyN;sigBytes;sigRest;sigAlgo;sigRaw
+    ⍝ RFC 4253 §§6-9  Algorithm negotiation and Diffie-Hellman key exchange
+    ⍝ Performs diffie-hellman-group14-sha256; derives session keys via SHA-256
+    ⍝ Verifies host key signature via RSA PKCS#1 v1.5 SHA-256
+    
+      ⍝ ── DH group14 prime p (RFC 3526 §3, 2048-bit) ───────────────────
+      ⎕FR←1287 ⋄ ⎕DCT←0
+      k←(
+      'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1'
+      '29024E088A67CC74020BBEA63B139B22514A08798E3404DD'
+      'EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245'
+      'E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED'
+      'EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3D'
+      'C2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F'
+      '83655D23DCA3AD961C62F356208552BB9ED529077096966D'
+      '670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B'
+      'E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9'
+      'DE2BCBF6955817183995497CEA956AE515D2261898FA0510'
+      '15728E5A8AACAA68FFFFFFFFFFFFFFFF'
+    )
+      p←16⊥¨{(2/(⍳0.5×≢⍵))⊆⍵}(¯1+(⎕D,⎕A)⍳⊢)∊k
+      g←2
+
+      ⍝ ── Step 1: build and send SSH_MSG_KEXINIT (RFC 4253 §7.1) ───────
+      ⍝fh←⎕NTIE'/dev/urandom' ⋄ cookie←⎕NREAD fh 83 16 0 ⋄ ⎕NUNTIE fh
+      ⎕RL←⍬ 2
+      cookie←⎕IO-⍨?16⍴256
+      kexPayload←∊((,MSG_KEXINIT),cookie
+                 (EncodeString 'diffie-hellman-group14-sha256')
+                 (EncodeString 'rsa-sha2-256')
+                 (EncodeString 'aes128-ctr'),(EncodeString 'aes128-ctr')
+                 (EncodeString 'hmac-sha2-256'),(EncodeString 'hmac-sha2-256')
+                 (EncodeString 'none'),(EncodeString 'none')
+                 (EncodeString ''),(EncodeString '')
+                 (EncodeBoolean 0),(EncodeUint32 0))
+      I_C←kexPayload
+      :If 0≠SendPacket kexPayload
+          r.(rc msg)←¯1 'Failed to send KEXINIT' ⋄ →0
+      :EndIf
+
+      ⍝ ── Step 2: receive server SSH_MSG_KEXINIT ───────────────────────
+      buf←⍬
+      (payload buf)←RecvPacket buf
+      :If MSG_KEXINIT≠⊃payload
+          r.(rc msg)←¯1('Expected KEXINIT(20), got type ',⍕⊃payload) ⋄ →0
+      :EndIf
+      I_S←payload   ⍝ full payload saved for exchange hash
+      
+      ⍝ ── Step 3a-b: DH private key x, public value e = g^x mod p ──────
+      ⍝fh←⎕NTIE'/dev/urandom' ⋄ x←256⊥⎕NREAD fh 83 32 0 ⋄ ⎕NUNTIE fh
+      ⍝÷0
+      b←⎕IO-⍨?32⍴256
+      e←PowMod((ToBEBytes g) b p)
+      ⍝÷0
+      :If 0≠SendPacket(,MSG_KEXDH_INIT),EncodeMpInt e
+          r.(rc msg)←¯1 'Failed to send KEXDH_INIT' ⋄ →0
+      :EndIf
+
+      ⍝ ── Step 3c: receive SSH_MSG_KEXDH_REPLY ─────────────────────────
+      (payload buf)←RecvPacket buf
+      :If MSG_KEXDH_REPLY≠⊃payload
+          r.(rc msg)←¯1('Expected KEXDH_REPLY(31), got type ',⍕⊃payload) ⋄ →0
+      :EndIf
+      ⍝÷0
+      rest←1↓payload
+      (KS rest)←DecodeString rest   ⍝ server host-key blob (K_S)
+      (f rest)←DecodeMpIntBytes rest ⍝ server DH public value (raw bytes)
+      (sigH rest)←DecodeString rest ⍝ signature of exchange hash
+
+
+      ⍝ ── Step 3d: shared secret K = f^x mod p ─────────────────────────
+      K←PowMod(f b p)
+
+      ⍝ ── Step 3e: sigH verification is deferred until after H is computed
+
+      ⍝ ── Step 3f: exchange hash H = SHA-256(V_C||V_S||I_C||I_S||K_S||e||f||K)
+      V_C←'SSH-2.0-DyalogSSHClient_0.1'
+      V_S←ServerBanner
+      H←sha256∊((EncodeString V_C),(EncodeString V_S)
+               (EncodeString ⎕UCS I_C),(EncodeString ⎕UCS I_S)
+               (EncodeString KS)
+               (EncodeMpInt e),(EncodeMpInt f),(EncodeMpInt K))
+      :If 0∊⍴SessionID ⋄ SessionID←H ⋄ :EndIf   ⍝ session ID = first H
+
+      ⍝ ── Step 3g: verify host key signature sigH against H ────────────
+      ksBytes←⎕UCS KS
+      (keyAlgo ksRest)←DecodeString ksBytes
+      (keyE ksRest)←DecodeStringRaw ksRest
+      (keyN ksRest)←DecodeStringRaw ksRest
+      sigBytes←⎕UCS sigH
+      (sigAlgo sigRest)←DecodeString sigBytes
+      (sigRaw sigRest)←DecodeStringRaw sigRest
+      :If ~RsaSha256Verify keyN keyE sigRaw H
+          r.(rc msg)←¯1 'Host key signature verification failed' ⋄ →0
+      :EndIf
+
+      ⍝ ── Step 4: exchange SSH_MSG_NEWKEYS ─────────────────────────────
+      :If 0≠SendPacket,MSG_NEWKEYS
+          r.(rc msg)←¯1 'Failed to send NEWKEYS' ⋄ →0
+      :EndIf
+      (payload buf)←RecvPacket buf
+      :If MSG_NEWKEYS≠⊃payload
+          r.(rc msg)←¯1('Expected NEWKEYS(21), got type ',⍕⊃payload) ⋄ →0
+      :EndIf
+
+      ⍝ ── Step 5: derive session keys and activate encryption ─────────
+      ⍝ Key = SHA-256(mpint(K) || H || letter || session_id)
+      CtrSend←16↑sha256(EncodeMpInt K),H,65,SessionID     ⍝ IV  C→S  (A)
+      CtrRecv←16↑sha256(EncodeMpInt K),H,66,SessionID     ⍝ IV  S→C  (B)
+      ekc←16↑sha256(EncodeMpInt K),H,67,SessionID         ⍝ Enc C→S  (C)
+      eks←16↑sha256(EncodeMpInt K),H,68,SessionID         ⍝ Enc S→C  (D)
+      MacKeySend←sha256(EncodeMpInt K),H,69,SessionID     ⍝ MAC C→S  (E)
+      MacKeyRecv←sha256(EncodeMpInt K),H,70,SessionID     ⍝ MAC S→C  (F)
+      InitCrypto ekc eks
+      CryptoActive←1
+      r.msg←''
+    ∇
+
+    ∇ r←SSHServiceRequest service;payload;buf
+    ⍝ RFC 4253 §10  Request a named SSH service (e.g. 'ssh-userauth')
+      r←⎕NS''
+      :If 0≠SendPacket(,MSG_SERVICE_REQUEST),EncodeString service
+          r.msg←'Failed to send SERVICE_REQUEST' ⋄ →0
+      :EndIf
+      buf←⍬
+      (payload buf)←RecvPacket buf
+      :If MSG_DISCONNECT=⊃payload
+          r.msg←'Server disconnected during SERVICE_REQUEST' ⋄ →0
+      :EndIf
+      :If MSG_SERVICE_ACCEPT≠⊃payload
+          r.msg←'Expected SERVICE_ACCEPT(6), got type ',⍕⊃payload ⋄ →0
+      :EndIf
+      r.msg←''
+    ∇
+
+    ∇ r←SSHAuthenticate r;home
+    ⍝ RFC 4252  User authentication
+    ⍝ Tries public-key auth if KeyFile is set; falls back to password auth
+    ⍝ Auto-discovers ~/.ssh/id_rsa if no credentials specified
+      :If ~0∊⍴Password
+          r←SSHAuthPassword r
+      :ElseIf ~0∊⍴KeyFile
+          r←SSHAuthPublicKey r
+      :Else
+          home←GetEnv'HOME'
+          :If (~0∊⍴home)∧⎕NEXISTS home,'/.ssh/id_rsa'
+              KeyFile←home,'/.ssh/id_rsa'
+              r←SSHAuthPublicKey r
+          :Else
+              r.msg←'No credentials supplied'
+          :EndIf
+      :EndIf
+    ∇
+
+    ∇ r←SSHAuthPassword r;payload;buf
+    ⍝ RFC 4252 §8  Password authentication method
+      payload←∊((,MSG_USERAUTH_REQUEST)
+               (EncodeString Username)
+               (EncodeString'ssh-connection')
+               (EncodeString'password')
+               (EncodeBoolean 0)
+               (EncodeString Password))
+      :If 0≠SendPacket payload
+          r.msg←'Failed to send USERAUTH_REQUEST' ⋄ →0
+      :EndIf
+      buf←⍬
+      (payload buf)←RecvPacket buf
+      :If MSG_USERAUTH_SUCCESS=⊃payload
+          Authenticated←1
+          r.msg←''
+      :ElseIf MSG_USERAUTH_FAILURE=⊃payload
+          r.msg←'Authentication failed'
+      :ElseIf MSG_DISCONNECT=⊃payload
+          r.msg←'Server disconnected during authentication'
+      :Else
+          r.msg←'Unexpected message type ',⍕⊃payload
+      :EndIf
+    ∇
+
+    ∇ r←SSHAuthPublicKey r;key;pubKeyBlob;probePayload;payload;buf;dataToSign;sigBytes;sigBlob;authPayload
+    ⍝ RFC 4252 §7  Public-key authentication method
+    ⍝ Uses PKCS#1 v1.5 RSA signing with SHA-256 via existing PowMod + sha256
+      :Trap (dbg 1)↓0
+          key←ParseOpenSSHKey KeyFile
+      :Else
+          r.msg←'Failed to parse key file: ',⊃⎕DMX.DM ⋄ →0
+      :EndTrap
+
+      ⍝ Build public key blob: "ssh-rsa" || e || n
+      pubKeyBlob←∊(EncodeString'ssh-rsa')(EncodeMpInt key.e)(EncodeMpInt key.n)
+
+      ⍝ Step 1: Send probe (no signature) to check if server accepts this key
+      probePayload←∊((,MSG_USERAUTH_REQUEST)
+                    (EncodeString Username)
+                    (EncodeString'ssh-connection')
+                    (EncodeString'publickey')
+                    (EncodeBoolean 0)
+                    (EncodeString'rsa-sha2-256')
+                    (EncodeStringBytes pubKeyBlob))
+      :If 0≠SendPacket probePayload
+          r.msg←'Failed to send publickey probe' ⋄ →0
+      :EndIf
+
+      ⍝ Step 2: Expect MSG_USERAUTH_PK_OK (60)
+      buf←⍬
+      (payload buf)←RecvPacket buf
+      :While MSG_USERAUTH_BANNER=⊃payload  ⍝ skip server banners (53)
+          (payload buf)←RecvPacket buf
+      :EndWhile
+      :If MSG_USERAUTH_PK_OK≠⊃payload
+          :If MSG_USERAUTH_FAILURE=⊃payload
+              r.msg←'Server rejected public key'
+          :ElseIf MSG_DISCONNECT=⊃payload
+              r.msg←'Server disconnected during publickey probe'
+          :Else
+              r.msg←'Expected USERAUTH_PK_OK(60), got type ',⍕⊃payload
+          :EndIf
+          →0
+      :EndIf
+
+      ⍝ Step 3: Build data to sign (RFC 4252 §7)
+      dataToSign←∊((EncodeStringBytes SessionID)
+                   (,MSG_USERAUTH_REQUEST)
+                   (EncodeString Username)
+                   (EncodeString'ssh-connection')
+                   (EncodeString'publickey')
+                   (EncodeBoolean 1)
+                   (EncodeString'rsa-sha2-256')
+                   (EncodeStringBytes pubKeyBlob))
+
+      ⍝ Step 4: Sign with RSA PKCS#1 v1.5 SHA-256
+      sigBytes←RsaSha256Sign key.n key.e key.d dataToSign
+
+      ⍝ Step 5: Build signature blob: "rsa-sha2-256" || raw-signature
+      sigBlob←∊(EncodeString'rsa-sha2-256')(EncodeStringBytes sigBytes)
+
+      ⍝ Step 6: Send full auth request with signature
+      authPayload←∊((,MSG_USERAUTH_REQUEST)
+                    (EncodeString Username)
+                    (EncodeString'ssh-connection')
+                    (EncodeString'publickey')
+                    (EncodeBoolean 1)
+                    (EncodeString'rsa-sha2-256')
+                    (EncodeStringBytes pubKeyBlob)
+                    (EncodeStringBytes sigBlob))
+      :If 0≠SendPacket authPayload
+          r.msg←'Failed to send signed publickey auth' ⋄ →0
+      :EndIf
+
+      ⍝ Step 7: Wait for result
+      (payload buf)←RecvPacket buf
+      :While MSG_USERAUTH_BANNER=⊃payload  ⍝ skip server banners (53)
+          (payload buf)←RecvPacket buf
+      :EndWhile
+      :If MSG_USERAUTH_SUCCESS=⊃payload
+          Authenticated←1
+          r.msg←''
+      :ElseIf MSG_USERAUTH_FAILURE=⊃payload
+          r.msg←'Public key authentication failed'
+      :ElseIf MSG_DISCONNECT=⊃payload
+          r.msg←'Server disconnected during publickey auth'
+      :Else
+          r.msg←'Unexpected message type ',⍕⊃payload
+      :EndIf
+    ∇
+
+    ∇ r←SSHOpenChannel r;payload;buf;recipientChannel;rest;maxPktSize;dummy
+    ⍝ RFC 4254 §5  Open a new session channel
+    ⍝ Must be called after successful authentication
+      ChannelID←ChannelID+1
+      ⍝ Send SSH_MSG_CHANNEL_OPEN: 'session', local channel, window size, max packet size
+      payload←∊((,MSG_CHANNEL_OPEN)
+               (EncodeString'session')
+               (EncodeUint32 ChannelID)
+               (EncodeUint32 2097152)
+               (EncodeUint32 32768))
+      :If 0≠SendPacket payload
+          r.msg←'Failed to send CHANNEL_OPEN' ⋄ →0
+      :EndIf
+      ⍝ Wait for confirmation or failure (skip transport messages and global requests)
+      buf←⍬
+      :Repeat
+          (payload buf)←RecvPacket buf
+          :If MSG_GLOBAL_REQUEST=⊃payload
+              ⍝ Decline any server global requests (e.g. hostkeys-00@openssh.com)
+              rest←1↓payload
+              (dummy rest)←DecodeString rest  ⍝ request name
+              :If 0≠⊃rest                     ⍝ want-reply flag
+                  {}SendPacket,MSG_REQUEST_FAILURE
+              :EndIf
+          :EndIf
+      :Until ~(⊃payload)∊MSG_IGNORE MSG_DEBUG MSG_GLOBAL_REQUEST
+      :If MSG_CHANNEL_OPEN_CONFIRMATION=⊃payload
+          rest←1↓payload
+          (recipientChannel rest)←DecodeUint32 rest
+          (RemoteChannelID rest)←DecodeUint32 rest
+          (RemoteWindowSize rest)←DecodeUint32 rest
+          (maxPktSize rest)←DecodeUint32 rest
+          r.msg←''
+      :ElseIf MSG_CHANNEL_OPEN_FAILURE=⊃payload
+          r.msg←'Channel open rejected by server'
+      :Else
+          r.msg←'Expected CHANNEL_OPEN_CONFIRMATION(91), got type ',⍕⊃payload
+      :EndIf
+    ∇
+
+    ∇ r←cmd SSHExec r;payload;buf;msgType;rest;chData;done;dummy;received
+    ⍝ RFC 4254 §6.5  Open a session channel and request remote command execution
+    ⍝ Collects stdout; returns data in r.Data
+
+      ⍝ Step 1: Open a session channel
+      →0↓⍨0∊⍴(SSHOpenChannel r).msg
+
+      ⍝ Step 2: Send SSH_MSG_CHANNEL_REQUEST for exec
+      payload←∊((,MSG_CHANNEL_REQUEST)
+               (EncodeUint32 RemoteChannelID)
+               (EncodeString'exec')
+               (EncodeBoolean 1)
+               (EncodeString cmd))
+      :If 0≠SendPacket payload
+          r.msg←'Failed to send exec request' ⋄ →0
+      :EndIf
+
+      ⍝ Step 3: Wait for CHANNEL_SUCCESS (skip window adjusts)
+      buf←⍬
+      :Repeat
+          (payload buf)←RecvPacket buf
+          msgType←⊃payload
+      :Until msgType≠MSG_CHANNEL_WINDOW_ADJUST
+      :If MSG_CHANNEL_FAILURE=msgType
+          r.msg←'Exec request rejected' ⋄ →0
+      :ElseIf MSG_CHANNEL_SUCCESS≠msgType
+          r.msg←'Expected CHANNEL_SUCCESS(99), got type ',⍕msgType ⋄ →0
+      :EndIf
+
+      ⍝ Step 4: Collect data until CHANNEL_CLOSE
+      r.Data←⍬
+      received←0
+      done←0
+      :While ~done
+          (payload buf)←RecvPacket buf
+          msgType←⊃payload
+          :Select msgType
+          :Case MSG_CHANNEL_DATA
+              rest←1↓payload
+              (dummy rest)←DecodeUint32 rest   ⍝ recipient channel
+              (chData rest)←DecodeStringRaw rest  ⍝ data payload (raw bytes)
+              r.Data,←chData
+              received+←≢chData
+              ⍝ Replenish receive window when half consumed
+              :If received≥1048576
+                  {}SendPacket(,MSG_CHANNEL_WINDOW_ADJUST),(EncodeUint32 RemoteChannelID),(EncodeUint32 received)
+                  received←0
+              :EndIf
+          :Case MSG_CHANNEL_EOF
+              ⍝ No more data from server
+          :Case MSG_CHANNEL_CLOSE
+              done←1
+          :Case MSG_CHANNEL_WINDOW_ADJUST
+              ⍝ Server increased our send window; ignored for exec
+          :Case MSG_CHANNEL_REQUEST
+              ⍝ Server may send exit-status or exit-signal; skip
+          :Else
+              r.msg←'Unexpected message type ',⍕msgType
+              done←1
+          :EndSelect
+      :EndWhile
+
+      ⍝ Step 5: Send our CHANNEL_CLOSE in response
+      {}SendPacket(,MSG_CHANNEL_CLOSE),(EncodeUint32 RemoteChannelID)
+
+      r.Data←'UTF-8'⎕UCS r.Data
+      r.(rc msg)←0 ''
+    ∇
+
+    ∇ payload←SSHDisconnectPacket args;reason;desc
+    ⍝ Build an SSH_MSG_DISCONNECT payload (msg type 1)
+    ⍝ args - (reason-code description)
+    ⍝ Returns payload suitable for SendPacket
+    ⍝ RFC 4253 §11.1: [byte MSG_DISCONNECT][uint32 reason][string description][string language-tag]
+      (reason desc)←2↑args
+      payload←(,MSG_DISCONNECT),(EncodeUint32 reason),(EncodeString desc),EncodeString''
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  SFTP subsystem methods (SSH File Transfer Protocol v3)
+⍝ ────────────────────────────────────────────────
+
+    ∇ r←SFTPOpenSession r;payload;buf;msgType;rest;recipientChannel;maxPktSize;dummy;sftpMsg
+    ⍝ Open an SSH channel with the SFTP subsystem and initialise the protocol
+      SFTPBuf←⍬ ⋄ SFTPRecvBuf←⍬ ⋄ SFTPReqID←0 ⋄ SFTPReceived←0
+
+      ⍝ Open a new session channel
+      ChannelID+←1
+      SFTPChanID←ChannelID
+      payload←∊((,MSG_CHANNEL_OPEN)
+               (EncodeString'session')
+               (EncodeUint32 SFTPChanID)
+               (EncodeUint32 2097152)
+               (EncodeUint32 32768))
+      :If 0≠SendPacket payload
+          r.msg←'Failed to send CHANNEL_OPEN for SFTP' ⋄ →0
+      :EndIf
+
+      ⍝ Wait for CHANNEL_OPEN_CONFIRMATION
+      buf←⍬
+      :Repeat
+          (payload buf)←RecvPacket buf
+          :If MSG_GLOBAL_REQUEST=⊃payload
+              rest←1↓payload
+              (dummy rest)←DecodeString rest
+              :If 0≠⊃rest ⋄ {}SendPacket,MSG_REQUEST_FAILURE ⋄ :EndIf
+          :EndIf
+      :Until ~(⊃payload)∊MSG_IGNORE MSG_DEBUG MSG_GLOBAL_REQUEST
+      :If MSG_CHANNEL_OPEN_CONFIRMATION≠⊃payload
+          :If MSG_CHANNEL_OPEN_FAILURE=⊃payload
+              r.msg←'SFTP channel open rejected by server'
+          :Else
+              r.msg←'Expected CHANNEL_OPEN_CONFIRMATION, got type ',⍕⊃payload
+          :EndIf
+          →0
+      :EndIf
+      rest←1↓payload
+      (recipientChannel rest)←DecodeUint32 rest
+      (SFTPRemoteChan rest)←DecodeUint32 rest
+      (SFTPRemoteWin rest)←DecodeUint32 rest
+      (maxPktSize rest)←DecodeUint32 rest
+
+      ⍝ Request "sftp" subsystem
+      payload←∊((,MSG_CHANNEL_REQUEST)
+               (EncodeUint32 SFTPRemoteChan)
+               (EncodeString'subsystem')
+               (EncodeBoolean 1)
+               (EncodeString'sftp'))
+      :If 0≠SendPacket payload
+          r.msg←'Failed to send subsystem request' ⋄ →0
+      :EndIf
+
+      ⍝ Wait for CHANNEL_SUCCESS
+      :Repeat
+          (payload buf)←RecvPacket buf
+          msgType←⊃payload
+      :Until msgType≠MSG_CHANNEL_WINDOW_ADJUST
+      :If MSG_CHANNEL_FAILURE=msgType
+          r.msg←'SFTP subsystem request rejected' ⋄ →0
+      :ElseIf MSG_CHANNEL_SUCCESS≠msgType
+          r.msg←'Expected CHANNEL_SUCCESS, got type ',⍕msgType ⋄ →0
+      :EndIf
+
+      SFTPRecvBuf←buf
+
+      ⍝ Send SSH_FXP_INIT (version 3)
+      {}SFTPSend(,FXP_INIT),(EncodeUint32 3)
+
+      ⍝ Receive SSH_FXP_VERSION
+      sftpMsg←SFTPRecv
+      :If 0∊⍴sftpMsg
+          r.msg←'Did not receive SFTP VERSION response' ⋄ →0
+      :EndIf
+      :If FXP_VERSION≠⊃sftpMsg
+          r.msg←'Expected FXP_VERSION(2), got type ',⍕⊃sftpMsg ⋄ →0
+      :EndIf
+
+      SFTPActive←1
+      r.msg←''
+    ∇
+
+    ∇ SFTPCloseSession;payload;msgType
+    ⍝ Close the SFTP subsystem channel
+      :If SFTPActive
+          :Trap 0
+              {}SendPacket(,MSG_CHANNEL_EOF),(EncodeUint32 SFTPRemoteChan)
+              {}SendPacket(,MSG_CHANNEL_CLOSE),(EncodeUint32 SFTPRemoteChan)
+              :Repeat
+                  (payload SFTPRecvBuf)←RecvPacket SFTPRecvBuf
+                  msgType←⊃payload
+              :Until msgType∊MSG_CHANNEL_CLOSE MSG_DISCONNECT
+          :EndTrap
+          SFTPActive←0
+          SFTPBuf←⍬ ⋄ SFTPRecvBuf←⍬
+          SFTPChanID←¯1 ⋄ SFTPRemoteChan←¯1
+      :EndIf
+    ∇
+
+    ∇ rc←SFTPSend body;sftpPkt;payload
+    ⍝ Send an SFTP packet over the subsystem channel
+    ⍝ body - byte vector: [type][payload]
+      :If dbg 4
+          ⎕←'DBG SFTPSend: body DR=',(⍕⎕DR body),' shape=',(⍕⍴body),' depth=',⍕≡body
+          ⎕←'DBG SFTPSend: body range: min=',(⍕⌊/body),' max=',(⍕⌈/body)
+      :EndIf
+      sftpPkt←(EncodeUint32≢body),body
+      :If dbg 4
+          ⎕←'DBG SFTPSend: sftpPkt DR=',(⍕⎕DR sftpPkt),' shape=',(⍕⍴sftpPkt),' depth=',⍕≡sftpPkt
+          ⎕←'DBG SFTPSend: sftpPkt range: min=',(⍕⌊/sftpPkt),' max=',(⍕⌈/sftpPkt)
+      :EndIf
+      payload←∊((,MSG_CHANNEL_DATA)
+               (EncodeUint32 SFTPRemoteChan)
+               (EncodeStringBytes sftpPkt))
+      :If dbg 4
+          ⎕←'DBG SFTPSend: payload DR=',(⍕⎕DR payload),' shape=',(⍕⍴payload),' depth=',⍕≡payload
+          ⎕←'DBG SFTPSend: payload range: min=',(⍕⌊/payload),' max=',(⍕⌈/payload)
+      :EndIf
+      rc←SendPacket payload
+    ∇
+
+    ∇ msg←SFTPRecv;payload;msgType;rest;sftpLen;len;dummy;adj
+    ⍝ Receive one complete SFTP message from the subsystem channel
+    ⍝ Returns byte vector [type][payload] (without length prefix), or ⍬ on EOF/close
+      :While 1
+          :If 4≤≢SFTPBuf
+              sftpLen←256⊥4↑SFTPBuf
+              :If (4+sftpLen)≤≢SFTPBuf
+                  msg←sftpLen↑4↓SFTPBuf
+                  SFTPBuf←(4+sftpLen)↓SFTPBuf
+                  →0
+              :EndIf
+          :EndIf
+          (payload SFTPRecvBuf)←RecvPacket SFTPRecvBuf
+          msgType←⊃payload
+          :Select msgType
+          :Case MSG_CHANNEL_DATA
+              rest←1↓payload
+              (dummy rest)←DecodeUint32 rest
+              (len rest)←DecodeUint32 rest
+              SFTPBuf,←len↑rest
+              SFTPReceived+←len
+              :If SFTPReceived≥1048576
+                  {}SendPacket(,MSG_CHANNEL_WINDOW_ADJUST),(EncodeUint32 SFTPRemoteChan),(EncodeUint32 SFTPReceived)
+                  SFTPReceived←0
+              :EndIf
+          :Case MSG_CHANNEL_WINDOW_ADJUST
+              rest←1↓payload
+              (dummy rest)←DecodeUint32 rest
+              (adj rest)←DecodeUint32 rest
+              SFTPRemoteWin+←adj
+          :Case MSG_CHANNEL_EOF
+              msg←⍬ ⋄ →0
+          :Case MSG_CHANNEL_CLOSE
+              SFTPActive←0 ⋄ msg←⍬ ⋄ →0
+          :Case MSG_GLOBAL_REQUEST
+              rest←1↓payload
+              (dummy rest)←DecodeString rest
+              :If 0≠⊃rest
+                  {}SendPacket,MSG_REQUEST_FAILURE
+              :EndIf
+          :EndSelect
+      :EndWhile
+    ∇
+
+    ∇ id←NextSFTPID
+    ⍝ Return the next SFTP request ID and increment the counter
+      id←SFTPReqID
+      SFTPReqID+←1
+    ∇
+
+    ∇ (attrs rest)←DecodeAttrs bytes;flags;sz;uid;gid;perms;atime;mtime;extCount;i;dummy
+    ⍝ Decode SFTP v3 file attributes from byte stream
+    ⍝ Returns namespace with flags size uid gid permissions atime mtime
+      attrs←⎕NS''
+      attrs.(flags size uid gid permissions atime mtime)←0 0 0 0 0 0 0
+      (flags rest)←DecodeUint32 bytes
+      attrs.flags←flags
+      :If 0≠2|flags                    ⍝ SSH_FILEXFER_ATTR_SIZE (bit 0)
+          (sz rest)←DecodeUint64 rest
+          attrs.size←sz
+      :EndIf
+      :If 0≠2|⌊flags÷2                ⍝ SSH_FILEXFER_ATTR_UIDGID (bit 1)
+          (uid rest)←DecodeUint32 rest
+          (gid rest)←DecodeUint32 rest
+          attrs.(uid gid)←uid gid
+      :EndIf
+      :If 0≠2|⌊flags÷4                ⍝ SSH_FILEXFER_ATTR_PERMISSIONS (bit 2)
+          (perms rest)←DecodeUint32 rest
+          attrs.permissions←perms
+      :EndIf
+      :If 0≠2|⌊flags÷8                ⍝ SSH_FILEXFER_ATTR_ACMODTIME (bit 3)
+          (atime rest)←DecodeUint32 rest
+          (mtime rest)←DecodeUint32 rest
+          attrs.(atime mtime)←atime mtime
+      :EndIf
+      :If 0≠2|⌊flags÷2147483648       ⍝ SSH_FILEXFER_ATTR_EXTENDED (bit 31)
+          (extCount rest)←DecodeUint32 rest
+          :For i :In ⍳extCount
+              (dummy rest)←DecodeString rest
+              (dummy rest)←DecodeString rest
+          :EndFor
+      :EndIf
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  SSH binary packet encoding helpers (RFC 4251)
+⍝ ────────────────────────────────────────────────
+
+    ∇ bytes←EncodeUint32 n
+    ⍝ Encode an integer as a 4-byte big-endian byte vector
+      :If n>4294967295
+          'Value exceeds uint32 range'⎕SIGNAL 11
+      :EndIf
+      bytes←∊(4⍴256)⊤n
+    ∇
+
+    ∇ bytes←EncodeString s
+    ⍝ RFC 4251 §5  Encode a string as [uint32 length][bytes]
+      bytes←(EncodeUint32⍴s),⎕UCS s
+    ∇
+
+    ∇ bytes←EncodeStringBytes b
+    ⍝ RFC 4251 §5  Encode a raw byte vector as [uint32 length][bytes]
+    ⍝ Like EncodeString but input is already integer bytes, not characters
+      bytes←(EncodeUint32≢b),b
+    ∇
+
+    ∇ bytes←EncodeBoolean b
+    ⍝ RFC 4251 §5  Encode a boolean (0=FALSE, anything else=TRUE)
+      bytes←,⍬⍴0≠b
+    ∇
+
+    ∇ bytes←EncodeUint64 n
+    ⍝ Encode an integer as an 8-byte big-endian byte vector
+      bytes←∊(8⍴256)⊤n
+    ∇
+
+    ∇ (n rest)←DecodeUint32 bytes
+    ⍝ Decode the first 4 bytes of bytes as a big-endian uint32; return value and remainder
+      n←256⊥4↑bytes
+      rest←4↓bytes
+    ∇
+
+    ∇ (n rest)←DecodeUint64 bytes
+    ⍝ Decode the first 8 bytes as a big-endian uint64; return value and remainder
+      n←256⊥8↑bytes
+      rest←8↓bytes
+    ∇
+
+    ∇ (s rest)←DecodeString bytes
+    ⍝ Decode a length-prefixed SSH string; return the string and remaining bytes
+      (len rest)←DecodeUint32 bytes
+      s←⎕UCS len↑rest
+      rest←len↓rest
+    ∇
+
+    ∇ (b rest)←DecodeStringRaw bytes;len
+    ⍝ Decode a length-prefixed string as raw integer bytes (no ⎕UCS conversion)
+      (len rest)←DecodeUint32 bytes
+      b←len↑rest
+      rest←len↓rest
+    ∇
+
+    ∇ packet←WrapPacket payload
+    ⍝ RFC 4253 §6  Wrap a payload in the SSH binary packet format
+    ⍝ Returns byte vector: [uint32 pkt_len][byte pad_len][payload][padding]
+      blockSize←8+8×CryptoActive           ⍝ 8 before crypto, 16 after (AES block size)
+      padLen←blockSize-blockSize|5+≢payload  ⍝ must be ≥4
+      padLen+←blockSize×padLen<4
+      pktLen←1+(≢payload)+padLen           ⍝ pad_length byte + payload + padding
+      packet←(EncodeUint32 pktLen),(,padLen),payload,(⎕IO-⍨?padLen⍴256)
+    ∇
+
+    ∇ (payload rest)←UnwrapPacket bytes
+    ⍝ RFC 4253 §6  Extract the payload from a received binary SSH packet
+      (pktLen rest)←DecodeUint32 bytes
+      padLen←⊃rest
+      payload←(¯1+pktLen-padLen)↑1↓rest   ⍝ drop pad_len byte and padding
+      rest←(pktLen+4)↓bytes               ⍝ remaining bytes after this packet
+      ⍝ NOTE: HMAC verification and decryption are handled by RecvPacket before calling this
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  DH / mpint helpers
+⍝ ────────────────────────────────────────────────
+    ∇ r←PowMod args;base;exp;mod;dll;zb;ze;zm;zr;nB;z0
+        base exp mod←args
+        dll←nettleDll
+
+        z0←⊂0 0 0  ⍝ zeroed mpz_t struct {I4 I4 P}, enclosed = one arg
+
+        'zinit'⎕NA dll,'|__gmpz_init   ={I4 I4 P}'
+        'zclear'⎕NA dll,'|__gmpz_clear  ={I4 I4 P}'
+        'zpowm'⎕NA dll,'|__gmpz_powm   ={I4 I4 P} <{I4 I4 P} <{I4 I4 P} <{I4 I4 P}'
+        'zset'⎕NA dll,'|nettle_mpz_set_str_256_u ={I4 I4 P} U4 <U1[]'
+        'zget'⎕NA dll,'|nettle_mpz_get_str_256   U4 >U1[] <{I4 I4 P}'
+
+        ⍝ Init — void + one = param → 1-element result vector
+        zb←zinit z0 ⋄ ze←zinit z0
+        zm←zinit z0 ⋄ zr←zinit z0
+
+        ⍝ Load from big-endian bytes — result is the modified struct
+        zb←zset(⊂zb)(≢base)base
+        ze←zset(⊂ze)(≢exp)exp
+        zm←zset(⊂zm)(≢mod)mod
+
+        ⍝ zr ← zb*ze mod zm — only zr comes back (the = param)
+        zr←zpowm(⊂zr)(⊂zb)(⊂ze)(⊂zm)
+
+        ⍝ Extract result bytes — void + one > param → 1-element result
+        nB←≢mod
+        r←zget nB nB(⊂zr)
+
+        ⍝ Free GMP limb allocations
+        _←zclear⊂zb ⋄ _←zclear⊂ze
+        _←zclear⊂zm ⋄ _←zclear⊂zr
+        ∇
+
+    ∇ bytes←EncodeMpInt n
+    ⍝ RFC 4251 §5  Encode a big-endian byte vector as an SSH mpint
+    ⍝ Result: [uint32 length][big-endian bytes, 0x00-padded if MSB set]
+      bytes←(∨\n≠0)⌿n          ⍝ strip leading zeros from byte vector
+      :If 0∊⍴bytes ⋄ bytes←,0 ⋄ :EndIf
+      :If 128≤⊃bytes ⋄ bytes←0,bytes ⋄ :EndIf  ⍝ prevent sign-bit misread
+      bytes←(EncodeUint32⍴bytes),bytes
+    ∇
+
+    ∇ (n rest)←DecodeMpInt bytes
+    ⍝ RFC 4251 §5  Decode an SSH mpint; return value and remaining bytes
+      (raw rest)←DecodeString bytes  ⍝ reads length-prefixed byte string
+      n←256⊥⎕UCS raw               ⍝ big-endian bytes → APL integer
+    ∇
+
+    ∇ (b rest)←DecodeMpIntBytes bytes;raw
+    ⍝ RFC 4251 §5  Decode an SSH mpint as a byte vector (no precision loss)
+      (raw rest)←DecodeString bytes
+      b←⎕UCS raw
+    ∇
+
+    ∇ rc←SendPacket payload;packet;mac;encrypted
+    ⍝ Build, optionally encrypt+MAC, and send an SSH packet; increment sequence number
+      :If dbg 4
+          ⎕←'DBG SendPacket: payload DR=',(⍕⎕DR payload),' shape=',(⍕⍴payload),' depth=',⍕≡payload
+          :If 0<≢payload ⋄ ⎕←'DBG SendPacket: payload range: min=',(⍕⌊/payload),' max=',(⍕⌈/payload) ⋄ :EndIf
+      :EndIf
+      packet←WrapPacket payload
+      :If dbg 4
+          ⎕←'DBG SendPacket: packet DR=',(⍕⎕DR packet),' shape=',(⍕⍴packet),' depth=',⍕≡packet
+          :If 0<≢packet ⋄ ⎕←'DBG SendPacket: packet range: min=',(⍕⌊/packet),' max=',(⍕⌈/packet) ⋄ :EndIf
+      :EndIf
+      :If CryptoActive
+          mac←MacKeySend hmacSha256(EncodeUint32 SeqSend),packet
+          (encrypted CtrSend)←aes128CtrCrypt AesCtxSend CtrSend packet
+          rc←⊃LDRC.Send Client(encrypted,mac)
+      :Else
+          rc←⊃LDRC.Send Client packet
+      :EndIf
+      SeqSend+←1
+    ∇
+
+    ∇ (payload rest)←RecvPacket buf;rc;obj;evt;data;pktLen;needed;firstBlock;restDecr;decrypted;mac;expectedMac
+    ⍝ Accumulate raw Conga bytes into buf until one complete SSH binary packet
+    ⍝ is available, then unwrap and return (payload, leftover bytes)
+      :If CryptoActive
+          ⍝ ── Encrypted receive ──────────────────────────────────────────
+          ⍝ Read at least one AES block (16 bytes) to learn packet length
+          :While (≢buf)<16
+              (rc obj evt data)←4↑LDRC.Wait Client WaitTime
+              :If (0≠rc)∨evt≢'Block'
+                  ⎕SIGNAL⊂('EN' 11)('Message'('RecvPacket: read error, rc=',⍕rc))
+              :EndIf
+              buf,←data
+          :EndWhile
+          ⍝ Decrypt first block to get packet_length
+          (firstBlock CtrRecv)←aes128CtrCrypt AesCtxRecv CtrRecv(16↑buf)
+          pktLen←256⊥4↑firstBlock
+          ⍝ Total: 4+pktLen encrypted bytes, then 32-byte MAC
+          needed←4+pktLen+32
+          :While (≢buf)<needed
+              (rc obj evt data)←4↑LDRC.Wait Client WaitTime
+              :If (0≠rc)∨evt≢'Block'
+                  ⎕SIGNAL⊂('EN' 11)('Message'('RecvPacket: read error, rc=',⍕rc))
+              :EndIf
+              buf,←data
+          :EndWhile
+          ⍝ Decrypt remaining encrypted bytes (after the first 16 already decrypted)
+          :If dbg 4
+              ⎕←'DBG RecvPacket: pktLen=',⍕pktLen
+              ⎕←'DBG RecvPacket: firstBlock DR=',(⍕⎕DR firstBlock),' shape=',⍕⍴firstBlock
+              ⎕←'DBG RecvPacket: firstBlock values=',⍕firstBlock
+              ⎕←'DBG RecvPacket: rest to decrypt=',(⍕pktLen-12),' bytes'
+          :EndIf
+          (restDecr CtrRecv)←aes128CtrCrypt AesCtxRecv CtrRecv((pktLen-12)↑16↓buf)
+          decrypted←firstBlock,restDecr
+          :If dbg 4
+              ⎕←'DBG RecvPacket: restDecr DR=',(⍕⎕DR restDecr),' shape=',⍕⍴restDecr
+              ⎕←'DBG RecvPacket: decrypted DR=',(⍕⎕DR decrypted),' shape=',(⍕⍴decrypted),' first16=',⍕16↑decrypted
+          :EndIf
+          ⍝ Verify MAC
+          mac←32↑(4+pktLen)↓buf
+          :If dbg 4 ⋄ ⎕←'DBG RecvPacket: seqRecv=',⍕SeqRecv ⋄ :EndIf
+          expectedMac←MacKeyRecv hmacSha256(EncodeUint32 SeqRecv),decrypted
+          :If mac≢expectedMac
+              ⎕SIGNAL⊂('EN' 11)('Message' 'MAC verification failed')
+          :EndIf
+          (payload rest)←UnwrapPacket decrypted
+          rest←(4+pktLen+32)↓buf
+      :Else
+          ⍝ ── Plaintext receive ──────────────────────────────────────────
+          :While (≢buf)<4
+              (rc obj evt data)←4↑LDRC.Wait Client WaitTime
+              :If (0≠rc)∨evt≢'Block'
+                  ⎕SIGNAL⊂('EN' 11)('Message'('RecvPacket: read error, rc=',⍕rc,', evt=',⍕evt))
+              :EndIf
+              buf,←data
+          :EndWhile
+          pktLen←256⊥4↑buf
+          needed←4+pktLen
+          :While (≢buf)<needed
+              (rc obj evt data)←4↑LDRC.Wait Client WaitTime
+              :If (0≠rc)∨evt≢'Block'
+                  ⎕SIGNAL⊂('EN' 11)('Message'('RecvPacket: read error, rc=',⍕rc,', evt=',⍕evt))
+              :EndIf
+              buf,←data
+          :EndWhile
+          (payload rest)←UnwrapPacket buf
+      :EndIf
+      SeqRecv+←1
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  Utility
+⍝ ────────────────────────────────────────────────
+
+    ∇ nameClass←nameClass ref
+    ⍝ Return the ⎕NC of ref (accepts both name strings and references)
+      nameClass←{0::⎕NC⍕⍵ ⋄ ⎕NC⊂,'⍵'}ref
+    ∇
+
+    ∇ stopIf condition
+    ⍝ Programmatic breakpoint helper (mirrors HttpCommand usage)
+      :If condition ⋄ .⎕SIGNAL 1000 ⋄ :EndIf
+    ∇
+
+    ∇ r←GetEnv var
+    ⍝ return enviroment variable setting for var
+      :Access public shared
+      r←2 ⎕NQ'.' 'GetEnvironment'var
+    ∇
+
+    dbg←{0≠2|⌊Debug÷⍵}                            ⍝ test whether debug bit ⍵ is set
+
+    ∇ r←dyalogRoot
+    ⍝ return path to interpreter
+      r←{⍵,('/\'∊⍨⊢/⍵)↓'/'}{0∊⍴t←GetEnv'DYALOG':⊃1 ⎕NPARTS⊃2 ⎕NQ'.' 'GetCommandLineArgs' ⋄ t}''
+    ∇
+
+    ToBEBytes←{⍵=0:,0 ⋄ (0~⍨⊢)256⊥⍣¯1⊢⍵}
+
+⍝ ────────────────────────────────────────────────
+⍝  Base64 decoding
+⍝ ────────────────────────────────────────────────
+
+    ∇ bytes←Base64Decode b64;⎕IO;⎕ML;chars;bits;part
+    ⍝ Decode a Base64-encoded character vector to an integer byte vector
+    ⍝ Based on dfns base64
+      ⎕IO ⎕ML←0 1
+      chars←'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+      bits←{,⍉(⍺⍴2)⊤⍵}
+      part←{((⍴⍵)⍴⍺↑1)⊂⍵}
+      bytes←2∘⊥∘(8∘↑)¨8 part{(-8|⍴⍵)↓⍵}6 bits{(⍵≠64)/⍵}chars⍳b64
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  OpenSSH private key parser
+⍝ ────────────────────────────────────────────────
+
+    ∇ key←ParseOpenSSHKey keyfile;lines;body;raw;pos;magic;cipherName;kdfName;kdfOpts;nKeys;pubBlob;privSection;check1;check2;keyType;rest;n;e;d;iqmp;p;q;comment
+    ⍝ Parse an OpenSSH-format private key file (openssh-key-v1)
+    ⍝ Returns namespace with n e d p q as byte vectors
+    ⍝ Only supports unencrypted keys (cipher = "none")
+      lines←⊃⎕NGET keyfile 1
+      ⍝ Strip BEGIN/END markers and blank lines
+      lines←(~∨/¨'-----'∘⍷¨lines)/lines
+      lines←(0<≢¨lines)/lines
+      body←∊lines
+      raw←Base64Decode body
+
+      ⍝ Verify magic: "openssh-key-v1\0" (15 bytes)
+      magic←'openssh-key-v1',(⎕UCS 0)
+      :If (⎕UCS(≢magic)↑raw)≢magic
+          'Not an OpenSSH private key file'⎕SIGNAL 11
+      :EndIf
+      rest←(≢magic)↓raw
+
+      ⍝ Read cipher name (expect "none")
+      (cipherName rest)←DecodeString rest
+      :If cipherName≢'none'
+          'Encrypted private keys are not supported'⎕SIGNAL 11
+      :EndIf
+
+      ⍝ Skip KDF name and KDF options
+      (kdfName rest)←DecodeString rest
+      (kdfOpts rest)←DecodeString rest
+
+      ⍝ Number of keys
+      (nKeys rest)←DecodeUint32 rest
+      :If nKeys≠1
+          'Expected exactly 1 key in file'⎕SIGNAL 11
+      :EndIf
+
+      ⍝ Skip public key blob (length-prefixed)
+      (pubBlob rest)←DecodeString rest
+
+      ⍝ Read private section (length-prefixed)
+      (privSection rest)←DecodeString rest
+      rest←⎕UCS privSection
+
+      ⍝ Verify check integers match
+      (check1 rest)←DecodeUint32 rest
+      (check2 rest)←DecodeUint32 rest
+      :If check1≠check2
+          'Private key check values do not match (wrong passphrase?)'⎕SIGNAL 11
+      :EndIf
+
+      ⍝ Read key type
+      (keyType rest)←DecodeString rest
+      :If keyType≢'ssh-rsa'
+          ('Unsupported key type: ',keyType)⎕SIGNAL 11
+      :EndIf
+
+      ⍝ Read RSA components as mpint byte vectors
+      ⍝ OpenSSH order: n, e, d, iqmp, p, q
+      (n rest)←DecodeMpIntBytes rest
+      (e rest)←DecodeMpIntBytes rest
+      (d rest)←DecodeMpIntBytes rest
+      (iqmp rest)←DecodeMpIntBytes rest
+      (p rest)←DecodeMpIntBytes rest
+      (q rest)←DecodeMpIntBytes rest
+
+      ⍝ Skip comment
+      ⍝ (comment rest)←DecodeString rest
+
+      key←⎕NS''
+      key.(n e d p q)←n e d p q
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  RSA PKCS#1 v1.5 signing
+⍝ ────────────────────────────────────────────────
+
+    ∇ ok←RsaSha256Verify(n e sig data);hash;recovered;keyLen;prefix;sep;di
+    ⍝ Verify an RSA PKCS#1 v1.5 SHA-256 signature
+    ⍝ n e   - RSA public key components (byte vectors)
+    ⍝ sig   - signature bytes
+    ⍝ data  - data that was signed (byte vector)
+    ⍝ Returns 1 if signature is valid, 0 if not
+      ok←0
+      hash←sha256 data
+      keyLen←≢(∨\n≠0)/n
+      recovered←(-keyLen)↑PowMod(sig e n)
+      ⍝ PKCS#1 v1.5: 0x00 0x01 [0xFF×≥8] 0x00 [DigestInfo]
+      →0⍴⍨(0 1)≢recovered[1 2]
+      sep←2+⊃⍸0=2↓recovered
+      →0⍴⍨sep<11
+      →0⍴⍨~∧/255=recovered[2+⍳sep-3]
+      di←sep↓recovered
+      prefix←48 49 48 13 6 9 96 134 72 1 101 3 4 2 1 5 0 4 32
+      ok←di≡prefix,hash
+    ∇
+
+    ∇ sig←RsaSha256Sign(n e d data);hash;digestInfo;prefix;padLen;padded;keyLen
+    ⍝ PKCS#1 v1.5 RSA signature with SHA-256
+    ⍝ n e d  - RSA key components (byte vectors)
+    ⍝ data   - data to sign (byte vector)
+    ⍝ sig    - signature (byte vector, same length as n)
+
+      ⍝ Hash the data
+      hash←sha256 data
+
+      ⍝ ASN.1 DigestInfo prefix for SHA-256 (19 bytes)
+      prefix←48 49 48 13 6 9 96 134 72 1 101 3 4 2 1 5 0 4 32
+      digestInfo←prefix,hash   ⍝ 51 bytes total
+
+      ⍝ Key length in bytes (strip any leading zero from n for signing)
+      keyLen←≢(∨\n≠0)⌿n
+
+      ⍝ PKCS#1 v1.5 padding: 0x00 0x01 [0xFF×padLen] 0x00 [digestInfo]
+      padLen←keyLen-3+≢digestInfo
+      :If padLen<8
+          'RSA key too short for SHA-256 signature'⎕SIGNAL 11
+      :EndIf
+      padded←0 1,(padLen⍴255),0,digestInfo
+
+      ⍝ RSA signing: signature = padded^d mod n
+      sig←PowMod(padded d n)
+
+      ⍝ Ensure output is exactly keyLen bytes (left-pad with zeros if needed)
+      sig←((-keyLen)↑sig)
+    ∇
+
+    ∇ r←nettleDll
+    ⍝ Return path to the Conga SSL shared library (contains nettle symbols)
+      r←∊1↓⊃1 ⎕NPARTS⊃(⎕NINFO⍠('Wildcard' 1)('Recurse' 1))'/*conga??ssl*.*',⍨(⊢2 ⎕NQ #'GetEnvironment',⊂)'Dyalog'
+    ∇
+
+⍝ ────────────────────────────────────────────────
+⍝  AES-128-CTR encryption helpers
+⍝ ────────────────────────────────────────────────
+
+    BytesXOR←{2⊥((8⍴2)⊤⍺)≠(8⍴2)⊤⍵}
+
+    ∇ ctr←IncrCtr ctr;i;s
+    ⍝ Increment a big-endian 16-byte counter by 1
+      :For i :In ⌽⍳≢ctr
+          s←1+ctr[i]
+          ctr[i]←256|s
+          :If s<256 ⋄ :Leave ⋄ :EndIf
+      :EndFor
+    ∇
+
+    ∇ (result newCtr)←aes128CtrCrypt(ctx ctr data);dll;AesEnc;i;ks;offset;n;blk
+    ⍝ AES-128-CTR encrypt/decrypt (symmetric operation)
+    ⍝ ctx   - 176-byte AES-128 context from InitCrypto
+    ⍝ ctr   - 16-byte counter (IV), updated across calls
+    ⍝ data  - byte vector to encrypt/decrypt
+      dll←nettleDll
+      'AesEnc'⎕NA dll,'|nettle_aes128_encrypt <U1[176] U8 >U1[16] <U1[16]'
+      result←⍬
+      newCtr←ctr
+      :For i :In ⍳⌈(≢data)÷16
+          ks←AesEnc ctx 16 16 newCtr
+          offset←16×i-⎕IO
+          n←16⌊(≢data)-offset
+          blk←n↑offset↓data
+          result,←(n↑ks)BytesXOR blk
+          newCtr←IncrCtr newCtr
+      :EndFor
+    ∇
+
+    ∇ InitCrypto(ekc eks);dll;AesSetKey
+    ⍝ Initialize AES-128 encrypt contexts for send and receive
+      dll←nettleDll
+      'AesSetKey'⎕NA dll,'|nettle_aes128_set_encrypt_key >U1[176] <U1[16]'
+      AesCtxSend←AesSetKey 176 ekc
+      AesCtxRecv←AesSetKey 176 eks
+    ∇
+
+    ∇ digest←sha256 data;Init;Update;Digest;ctx;dll;⎕IO
+    ⍝ Compute SHA-256 of data (integer byte vector or character vector) using nettle
+      ⎕IO←0 ⋄ dll←nettleDll
+      'Init'⎕NA dll,'|nettle_sha256_init >I1[336]'
+      'Update'⎕NA dll,'|nettle_sha256_update =I1[336] U8 <U1[]'  ⍝ Add data to hash
+      'Digest'⎕NA dll,'|nettle_sha256_digest =I1[336] U8 >U1[32]'  ⍝ Finalize and get digest
+      ctx←Init 336
+      ctx←Update ctx(⍴∊data)(∊data)
+      ctx digest←Digest ctx 32 32
+    ∇
+
+    ∇ digest←key hmacSha256 data;SetKey;Update;Digest;ctx;dll;⎕IO
+    ⍝ Compute HMAC-SHA-256 using nettle
+    ⍝ hmac_sha256_ctx = 2×sha256_ctx(336 bytes) + digest(32 bytes) = 704 bytes
+      ⎕IO←0 ⋄ dll←nettleDll
+      'SetKey'⎕NA dll,'|nettle_hmac_sha256_set_key >U1[704] U8 <U1[]'
+      'Update'⎕NA dll,'|nettle_hmac_sha256_update =U1[704] U8 <U1[]'
+      'Digest'⎕NA dll,'|nettle_hmac_sha256_digest =U1[704] U8 >U1[32]'
+      :If dbg 8
+          ⎕←'DBG HMAC: key shape=',(⍕⍴key),' depth=',(⍕≡key),' DR=',⍕⎕DR key
+          ⎕←'DBG HMAC: data shape=',(⍕⍴data),' depth=',(⍕≡data),' DR=',⍕⎕DR data
+          ⎕←'DBG HMAC: data range: min=',(⍕⌊/data),' max=',⍕⌈/data
+      :EndIf
+      ctx←SetKey 704(⍴key)key
+      :If dbg 8 ⋄ ⎕←'DBG HMAC: SetKey OK, ctx shape=',⍕⍴ctx ⋄ :EndIf
+      ctx←Update ctx(⍴data)data
+      :If dbg 8 ⋄ ⎕←'DBG HMAC: Update OK' ⋄ :EndIf
+      ctx digest←Digest ctx 32 32
+    ∇
+
+:EndClass
