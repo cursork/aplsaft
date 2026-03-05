@@ -1,6 +1,6 @@
 :Namespace SFTP
     ⍝ Minimal SFTP client for Dyalog APL using libssh2
-    ⍝ Dependencies: libssh2 (via Homebrew), libc
+    ⍝ Dependencies: libssh2, libc
 
     ⎕IO←0
 
@@ -28,23 +28,38 @@
     S_IFREG←32768   ⍝ 0o100000
     S_IFLNK←40960   ⍝ 0o120000
 
-    ⍝ addrinfo struct offsets (macOS arm64)
-    AI_FAMILY←4       ⍝ offset 4, 4 bytes (I4)
-    AI_ADDRLEN←16     ⍝ offset 16, 4 bytes (U4)
-    AI_ADDR←32        ⍝ offset 32, 8 bytes (P)
-    AI_SIZE←48        ⍝ total struct size
-
     ⍝ Socket constants
     SOCK_STREAM←1
     AF_INET←2
 
     init←0
 
-    ∇ Init;libc;ssh
+    ⍝ Find the first existing file from a list of candidates
+    _probe←{
+        h←⎕NEXISTS¨⍵
+        0=+/h:⎕SIGNAL⊂('EN'SFTP_ERR)('Message'('Library not found. Tried: ',{⍺,', ',⍵}/⍵))
+        (⊃⍸h)⊃⍵
+    }
+
+    ∇ Init;libc;ssh;os
         →init/0
+        os←⊃⎕SH'uname -s'
+
+        ⍝ addrinfo struct offsets (macOS BSD reorders fields vs Linux POSIX)
+        :Select os
+        :Case 'Darwin'
+            AI_FAMILY←4 ⋄ AI_ADDRLEN←16 ⋄ AI_ADDR←32 ⋄ AI_SIZE←48
+            libc←'/usr/lib/libSystem.B.dylib'
+            ssh←_probe '/opt/homebrew/opt/libssh2/lib/libssh2.dylib' '/usr/local/opt/libssh2/lib/libssh2.dylib' '/usr/local/lib/libssh2.dylib'
+        :Case 'Linux'
+            AI_FAMILY←4 ⋄ AI_ADDRLEN←16 ⋄ AI_ADDR←24 ⋄ AI_SIZE←48
+            libc←_probe '/lib/x86_64-linux-gnu/libc.so.6' '/lib/aarch64-linux-gnu/libc.so.6' '/lib64/libc.so.6' '/lib/libc.so.6'
+            ssh←_probe '/usr/lib/x86_64-linux-gnu/libssh2.so.1' '/usr/lib/aarch64-linux-gnu/libssh2.so.1' '/usr/lib64/libssh2.so.1' '/usr/lib/libssh2.so.1'
+        :Else
+            ⎕SIGNAL⊂('EN'SFTP_ERR)('Message'('Unsupported OS: ',os))
+        :EndSelect
 
         ⍝ libc for sockets, DNS, and memory reading
-        libc←'/usr/lib/libSystem.B.dylib'
         'mread'⎕NA libc,'|memcpy =U1[] P P'
         ⎕NA'I ',libc,'|getaddrinfo <0C <0C P >P'
         ⎕NA libc,'|freeaddrinfo P'
@@ -53,7 +68,6 @@
         ⎕NA'I ',libc,'|close I'
 
         ⍝ libssh2
-        ssh←'/opt/homebrew/opt/libssh2/lib/libssh2.dylib'
         ⎕NA'I  ',ssh,'|libssh2_init                            I'
         ⎕NA'P  ',ssh,'|libssh2_session_init_ex                 P P P P'
         ⎕NA'I  ',ssh,'|libssh2_session_handshake&              P I'

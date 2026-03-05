@@ -1,4 +1,4 @@
- ∇ Example;conn;listing;entry;attrs;data;names
+ ∇ Example(host port user keypath);conn;listing;entry;attrs;data;names
 ⍝ === SFTP Library — A Guided Tour ===
 ⍝
 ⍝ This function demonstrates every operation in the SFTP library.
@@ -7,7 +7,7 @@
 ⍝
 ⍝ To run:  ]link.import # path/to/SFTP.apln
 ⍝          ]link.import # path/to/Example.aplf
-⍝          Example
+⍝          Example '89.167.123.234' 22 'root' '/tmp/aplsftp-test-key'
 
 ⍝ ── Connecting ──────────────────────────────────────────────────────
 ⍝
@@ -19,7 +19,7 @@
 ⍝ Both return an opaque connection namespace. All subsequent
 ⍝ operations take this as their first argument.
 
-   conn←SFTP.ConnectWithKey '89.167.123.234' 22 'root' '/tmp/aplsftp-test-key' ''
+   conn←SFTP.ConnectWithKey host port user keypath ''
    ⎕←'Connected.'
 
 ⍝ ── Listing a directory ─────────────────────────────────────────────
