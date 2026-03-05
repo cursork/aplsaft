@@ -3,9 +3,9 @@
     ⍝ Maintains a model of the remote filesystem tree, applies random
     ⍝ operations, and verifies the server matches the model.
     ⍝
-    ⍝ Usage:  GenTest.Run n seed
-    ⍝   n>0: run n iterations     e.g.  GenTest.Run 100 42
-    ⍝   n<0: run for |n seconds   e.g.  GenTest.Run ¯900 42
+    ⍝ Usage:  GenTest.Run n seed host port user keypath
+    ⍝   n>0: run n iterations     e.g.  GenTest.Run 100 42 'host' 22 'user' '/path/to/key'
+    ⍝   n<0: run for |n seconds   e.g.  GenTest.Run ¯900 42 'host' 22 'user' '/path/to/key'
 
     ⎕IO←0
 
@@ -27,7 +27,7 @@
     _fullpath←{⍺,(⍵≢'/')/⍵}
 
     ⍝ ── Main entry point ───────────────────────────────────────────
-    ∇ Run(n seed);conn;base;model;i;op;ops;counts;fails;t0;elapsed;timed
+    ∇ Run(n seed host port user keypath);conn;base;model;i;op;ops;counts;fails;t0;elapsed;timed
         ⎕RL←seed
         timed←n<0
         ops←'mkdir' 'put' 'get' 'list' 'stat' 'rename' 'delete' 'rmdir' 'download' 'upload' 'negative'
@@ -35,7 +35,7 @@
         fails←0
         base←'/tmp/aplsftp-fuzz-',⍕seed
 
-        conn←#.SFTP.ConnectWithKey '89.167.123.234' 22 'root' '/tmp/aplsftp-test-key' ''
+        conn←#.SFTP.ConnectWithKey host port user keypath ''
         ⎕←'Connected. Base: ',base
 
         ⍝ Create base directory (clean up leftover if exists)

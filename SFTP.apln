@@ -204,19 +204,16 @@
             'sftp_init failed'⎕SIGNAL SFTP_ERR
         :EndIf
 
-        conn←⎕NS''
-        conn.fd←fd
-        conn.session←session
-        conn.sftp←sftp
+        conn←(fd: fd ⋄ session: session ⋄ sftp: sftp)
     ∇
 
     ∇ conn←ConnectWithPass(host port user pass);u;p
-        u←_u8 user ⋄ p←_u8 pass
+        (u p)←_u8¨user pass
         conn←{libssh2_userauth_password_ex ⍵ u(≢u)p(≢p)0}_connect host port
     ∇
 
     ∇ conn←ConnectWithKey(host port user keyfile passphrase);u;k;pp
-        u←_u8 user ⋄ k←_u8 keyfile ⋄ pp←_u8 passphrase
+        (u k pp)←_u8¨user keyfile passphrase
         conn←{libssh2_userauth_publickey_fromfile_ex ⍵ u(≢u)0 k pp}_connect host port
     ∇
 
@@ -265,14 +262,15 @@
         rc a←libssh2_sftp_stat_ex conn.sftp p(≢p)0 0
         ⎕SIGNAL(rc≠0)/⊂('EN'SFTP_ERR)('Message'('stat failed: ',path,' — ',_sftperr conn))
         ⍝ a is: flags filesize uid gid permissions atime mtime
-        attrs←⎕NS''
-        attrs.flags←0⊃a
-        attrs.filesize←1⊃a
-        attrs.uid←2⊃a
-        attrs.gid←3⊃a
-        attrs.permissions←4⊃a
-        attrs.atime←5⊃a
-        attrs.mtime←6⊃a
+        attrs←(
+            flags: 0⊃a
+            filesize: 1⊃a
+            uid: 2⊃a
+            gid: 3⊃a
+            permissions: 4⊃a
+            atime: 5⊃a
+            mtime: 6⊃a
+        )
     ∇
 
     ∇ data←Get(conn path);p;handle;buf;rc;chunks;crc
@@ -375,7 +373,7 @@
     ∇ Rename(conn old new);o;n;rc
         ⍝ Flags=7 (OVERWRITE|ATOMIC|NATIVE): overwrites target if it exists
         :If ~init ⋄ Init ⋄ :EndIf
-        o←_u8 old ⋄ n←_u8 new
+        (o n)←_u8¨old new
         rc←libssh2_sftp_rename_ex conn.sftp o(≢o)n(≢n)7
         ⎕SIGNAL(rc≠0)/⊂('EN'SFTP_ERR)('Message'('rename failed: ',old,' → ',new,' — ',_sftperr conn))
     ∇

@@ -7,7 +7,7 @@
 ⍝
 ⍝ To run:  ]link.import # path/to/SFTP.apln
 ⍝          ]link.import # path/to/Example.aplf
-⍝          Example '89.167.123.234' 22 'root' '/tmp/aplsftp-test-key'
+⍝          Example 'host' 22 'user' '/path/to/key'
 
 ⍝ ── Connecting ──────────────────────────────────────────────────────
 ⍝

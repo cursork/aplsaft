@@ -1,16 +1,30 @@
 # aplsaft
 
-A minimal SFTP client library for Dyalog APL, built on libssh2 via `⎕NA`.
+Two implementations for SFTP in Dyalog APL.
 
-No Conga. No external APL dependencies. One file.
+## SFTP.apln
 
-## Requirements
+A minimal SFTP client library for Dyalog APL, built on libssh2 via `⎕NA`. No
+Conga. No external APL dependencies. One file.
+
+The rest of the docs are concerned with this, as it currently stands.
+
+## SSHClient.aplc
+
+A completely separate and 'pure' Dyalog implementation, in the sense that the
+only dependency is Conga.
+
+## SFTP Namespace
+
+### Requirements
 
 - Dyalog APL 20.0+
 - libssh2 (macOS: `brew install libssh2`; Linux: system package)
 - macOS or Linux (64-bit)
+  - should work under WSL, and uses standard portable libraries, but not yet
+    tested in Windows
 
-## Quick start
+#### Quick start
 
 ```apl
 ]link.import # /path/to/SFTP.apln
@@ -40,9 +54,9 @@ SFTP.Rename conn '/old/path' '/new/path'
 SFTP.Disconnect conn
 ```
 
-## API reference
+### API reference
 
-### Connection
+#### Connection
 
 | Function | Arguments | Returns |
 |---|---|---|
@@ -52,7 +66,7 @@ SFTP.Disconnect conn
 
 `conn` is an opaque namespace. Pass it as the first argument to every operation.
 
-### File operations
+#### File operations
 
 | Function | Arguments | Returns |
 |---|---|---|
@@ -63,7 +77,7 @@ SFTP.Disconnect conn
 
 `Put` accepts character vectors (auto-encoded as UTF-8) or integer byte vectors (0–255, written as-is).
 
-### Directory operations
+#### Directory operations
 
 | Function | Arguments | Returns |
 |---|---|---|
@@ -81,19 +95,60 @@ names ← ⊃¨ SFTP.List conn '/dir'
 names ← (~names∊(,'.') '..')/names
 ```
 
-### Errors
+#### Errors
 
 All errors signal `810` with a descriptive message. Trap with `:Trap 810` or `:Trap 0`.
 
-## Files
+### Testing
 
-| File | Purpose |
-|---|---|
-| `SFTP.apln` | The library — single namespace, all code inline |
-| `Example.aplf` | Literate walkthrough demonstrating every operation |
-| `GenTest.apln` | Model-based generative tester: `GenTest.Run 100 42` |
+`GenTest.apln` is a model-based generative tester. It has an in-memory model of
+the remote filesystem, applies operations randomly (mkdir, put, get, list, stat,
+rename, delete, rmdir, download, upload), and checks the server against the
+model after each one. A final verification pass re-reads every file and walks
+every directory to confirm nothing drifted.
 
-## Architecture
+Negative cases are also part of it, eg get/delete/stat on nonexistent paths,
+mkdir on existing directories, rmdir on non-empty directories are  all expected to
+signal.
+
+```apl
+]link.import # /path/to/SFTP.apln
+]link.import # /path/to/GenTest.apln
+
+GenTest.Run 100 42 'host' 22 'user' '/path/to/key'     ⍝ 100 iterations, seed 42
+GenTest.Run ¯60 7 'host' 22 'user' '/path/to/key'      ⍝ run for 60 seconds, seed 7
+```
+
+Positive `n` sets an iteration count; negative `n` sets a time budget in seconds. The seed makes runs reproducible. Connection parameters match `Example`. Output looks like:
+
+```
+Connected. Base: /tmp/aplsftp-fuzz-42
+  mkdir /KBZQW
+  put /KBZQW/AMXRL.dat (312 bytes)
+  get /KBZQW/AMXRL.dat OK
+  list / OK (1 entries)
+  negative: get nonexistent OK
+  rename /KBZQW/AMXRL.dat → /HTDNÉ/VPQJF.dat
+  ...
+
+=== Verification ===
+  OK: /HTDNÉ/VPQJF.dat
+  DIR OK: / (2 entries)
+  DIR OK: /KBZQW (0 entries)
+All 1 files and 3 dirs verified.
+Cleaned up.
+
+=== Summary ===
+Iterations: 100 in 8.4s
+mkdir:     12
+put:       15
+get:       9
+...
+Failures: 0
+Seed: 42
+```
+
+### Architecture
 
 The library binds ~20 libssh2 functions and 6 libc functions via `⎕NA`:
 
