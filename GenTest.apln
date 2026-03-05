@@ -53,7 +53,7 @@
             ⍝ Bias toward constructive ops when tree is small
             :If (≢model.files)<3 ⋄ op←?2 ⋄ :Else ⋄ op←?≢ops ⋄ :EndIf
             counts[op]+←1
-            :Trap 810 99
+            :Trap 0
                 :Select op
                 :Case 0 ⋄ _mkdir conn base model
                 :Case 1 ⋄ _put conn base model
@@ -69,16 +69,32 @@
                 :EndSelect
             :Else
                 fails+←1
-                ⎕←'  FAIL #',(⍕i),' ',(op⊃ops),': ',(⍕⎕DMX.EN),' ',⎕DMX.Message
+                ⎕←''
+                ⎕←'=== FAIL on iteration ',(⍕i),' (',(op⊃ops),') ==='
+                {⎕←⍵}¨⎕DMX.DM
+                :Leave
             :EndTrap
         :EndWhile
 
         ⍝ Final verification: re-read every file and compare
-        fails+←_verify conn base model
+        :Trap 810
+            fails+←_verify conn base model
+        :Else
+            ⎕←'Verification aborted: ',⎕DMX.Message
+            fails+←1
+        :EndTrap
 
         ⍝ Clean up remote tree
-        _cleanup conn base model
-        #.SFTP.Disconnect conn
+        :Trap 810
+            _cleanup conn base model
+        :Else
+            ⎕←'Cleanup aborted: ',⎕DMX.Message
+        :EndTrap
+        :Trap 810
+            #.SFTP.Disconnect conn
+        :Else
+            ⎕←'Disconnect failed: ',⎕DMX.Message
+        :EndTrap
 
         ⍝ Summary
         elapsed←((2⊃⎕AI)-t0)÷1000
@@ -251,7 +267,7 @@
         actual←256|⎕NREAD tn 83(⎕NSIZE tn)
         ⎕NUNTIE tn
         :If expected≢actual
-            {}⎕NDELETE localpath
+            ⎕NDELETE localpath
             ⎕←'  DOWNLOAD MISMATCH: ',path,' expected ',(⍕≢expected),' got ',(⍕≢actual),' bytes'
             ('download mismatch: ',path)⎕SIGNAL 99
         :EndIf
@@ -260,7 +276,7 @@
         tn←localpath ⎕NTIE 0
         actual←256|⎕NREAD tn 83(⎕NSIZE tn)
         ⎕NUNTIE tn
-        {}⎕NDELETE localpath
+        ⎕NDELETE localpath
         :If expected≢actual
             ⎕←'  DOWNLOAD OVERWRITE MISMATCH: ',path
             ('download overwrite mismatch: ',path)⎕SIGNAL 99
@@ -275,12 +291,12 @@
         path←(('/'≡dir)↓dir),'/',name
         data←?(1+?999)⍴256
         localpath←'/private/tmp/aplsftp-test/gentest-tmp'
-        :Trap 0 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
+        :Trap 22 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
         tn←localpath ⎕NCREATE 0
         (⎕UCS data) ⎕NAPPEND tn 80
         ⎕NUNTIE tn
         #.SFTP.Upload conn localpath(base,path)
-        :Trap 0 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
+        :Trap 22 ⋄ ⎕NDELETE localpath ⋄ :EndTrap
         actual←#.SFTP.Get conn(base,path)
         :If data≢actual
             ⎕←'  UPLOAD MISMATCH: ',path,' expected ',(⍕≢data),' got ',(⍕≢actual),' bytes'

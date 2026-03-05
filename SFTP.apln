@@ -61,10 +61,10 @@
 
         ⍝ libc for sockets, DNS, and memory reading
         'mread'⎕NA libc,'|memcpy =U1[] P P'
-        ⎕NA'I ',libc,'|getaddrinfo <0C <0C P >P'
+        ⎕NA'I ',libc,'|getaddrinfo& <0C <0C P >P'
         ⎕NA libc,'|freeaddrinfo P'
         ⎕NA'I ',libc,'|socket I I I'
-        ⎕NA'I ',libc,'|connect I <U1[] U4'
+        ⎕NA'I ',libc,'|connect& I <U1[] U4'
         ⎕NA'I ',libc,'|close I'
 
         ⍝ libssh2
@@ -77,21 +77,21 @@
         ⎕NA'I  ',ssh,'|libssh2_session_last_errno              P'
         ⎕NA'   ',ssh,'|libssh2_session_set_blocking            P I'
         ⎕NA'I  ',ssh,'|libssh2_userauth_authenticated          P'
-        ⎕NA'I  ',ssh,'|libssh2_userauth_password_ex            P <0C U <0C U P'
-        ⎕NA'I  ',ssh,'|libssh2_userauth_publickey_fromfile_ex  P <0C U P <0C <0C'
-        ⎕NA'P  ',ssh,'|libssh2_sftp_init                       P'
-        ⎕NA'I  ',ssh,'|libssh2_sftp_shutdown                   P'
+        ⎕NA'I  ',ssh,'|libssh2_userauth_password_ex&           P <0C U <0C U P'
+        ⎕NA'I  ',ssh,'|libssh2_userauth_publickey_fromfile_ex& P <0C U P <0C <0C'
+        ⎕NA'P  ',ssh,'|libssh2_sftp_init&                      P'
+        ⎕NA'I  ',ssh,'|libssh2_sftp_shutdown&                  P'
         ⎕NA'U8 ',ssh,'|libssh2_sftp_last_error                 P'
-        ⎕NA'P  ',ssh,'|libssh2_sftp_open_ex                    P <0C U U8 I8 I'
-        ⎕NA'I  ',ssh,'|libssh2_sftp_close_handle               P'
+        ⎕NA'P  ',ssh,'|libssh2_sftp_open_ex&                   P <0C U U8 I8 I'
+        ⎕NA'I  ',ssh,'|libssh2_sftp_close_handle&              P'
         ⎕NA'I  ',ssh,'|libssh2_sftp_read&                      P =U1[] P'
         ⎕NA'I  ',ssh,'|libssh2_sftp_write&                     P <U1[] P'
-        ⎕NA'I  ',ssh,'|libssh2_sftp_readdir_ex                 P =U1[] P =U1[] P >{U8 U8 U8 U8 U8 U8 U8}'
-        ⎕NA'I  ',ssh,'|libssh2_sftp_stat_ex                    P <0C U I >{U8 U8 U8 U8 U8 U8 U8}'
-        ⎕NA'I  ',ssh,'|libssh2_sftp_mkdir_ex                   P <0C U U8'
-        ⎕NA'I  ',ssh,'|libssh2_sftp_rmdir_ex                   P <0C U'
-        ⎕NA'I  ',ssh,'|libssh2_sftp_rename_ex                  P <0C U <0C U U8'
-        ⎕NA'I  ',ssh,'|libssh2_sftp_unlink_ex                  P <0C U'
+        ⎕NA'I  ',ssh,'|libssh2_sftp_readdir_ex&                P =U1[] P =U1[] P >{U8 U8 U8 U8 U8 U8 U8}'
+        ⎕NA'I  ',ssh,'|libssh2_sftp_stat_ex&                   P <0C U I >{U8 U8 U8 U8 U8 U8 U8}'
+        ⎕NA'I  ',ssh,'|libssh2_sftp_mkdir_ex&                  P <0C U U8'
+        ⎕NA'I  ',ssh,'|libssh2_sftp_rmdir_ex&                  P <0C U'
+        ⎕NA'I  ',ssh,'|libssh2_sftp_rename_ex&                 P <0C U <0C U U8'
+        ⎕NA'I  ',ssh,'|libssh2_sftp_unlink_ex&                 P <0C U'
 
         ⍝ Initialize libssh2
         {⎕SIGNAL(⍵≠0)/⊂('EN'SFTP_ERR)('Message' 'libssh2_init failed')}libssh2_init 0
@@ -105,6 +105,7 @@
     ∇ s←_readcstr ptr;byte;bytes
         bytes←⍬
         :Repeat
+            →(4096≤≢bytes)/done
             byte←⊃mread(1⍴0)ptr 1
             →(byte=0)/done
             bytes,←byte
@@ -163,7 +164,7 @@
 
         rc←connect fd sabytes addrlen
         :If rc≠0
-            {}close fd
+            _←close fd
             ⎕SIGNAL⊂('EN'SFTP_ERR)('Message'('connect() failed: ',host,':',portstr))
         :EndIf
     ∇
@@ -175,31 +176,31 @@
 
         session←libssh2_session_init_ex 0 0 0 0
         :If session=0
-            {}close fd
+            _←close fd
             'session_init failed'⎕SIGNAL SFTP_ERR
         :EndIf
 
         rc←libssh2_session_handshake session fd
         :If rc≠0
             msg←_errmsg session
-            {}libssh2_session_free session
-            {}close fd
+            _←libssh2_session_free session
+            _←close fd
             ('handshake failed: ',msg)⎕SIGNAL SFTP_ERR
         :EndIf
 
         rc←auth_fn session
         :If rc≠0
-            {}libssh2_session_disconnect_ex session 11 'auth failed' ''
-            {}libssh2_session_free session
-            {}close fd
+            _←libssh2_session_disconnect_ex session 11 'auth failed' ''
+            _←libssh2_session_free session
+            _←close fd
             'authentication failed'⎕SIGNAL SFTP_ERR
         :EndIf
 
         sftp←libssh2_sftp_init session
         :If sftp=0
-            {}libssh2_session_disconnect_ex session 11 'sftp init failed' ''
-            {}libssh2_session_free session
-            {}close fd
+            _←libssh2_session_disconnect_ex session 11 'sftp init failed' ''
+            _←libssh2_session_free session
+            _←close fd
             'sftp_init failed'⎕SIGNAL SFTP_ERR
         :EndIf
 
@@ -209,50 +210,52 @@
         conn.sftp←sftp
     ∇
 
-    ∇ conn←ConnectWithPass(host port user pass)
-        conn←{libssh2_userauth_password_ex ⍵ user(≢user)pass(≢pass)0}_connect host port
+    ∇ conn←ConnectWithPass(host port user pass);u;p
+        u←_u8 user ⋄ p←_u8 pass
+        conn←{libssh2_userauth_password_ex ⍵ u(≢u)p(≢p)0}_connect host port
     ∇
 
-    ∇ conn←ConnectWithKey(host port user keyfile passphrase)
-        conn←{libssh2_userauth_publickey_fromfile_ex ⍵ user(≢user)0 keyfile passphrase}_connect host port
+    ∇ conn←ConnectWithKey(host port user keyfile passphrase);u;k;pp
+        u←_u8 user ⋄ k←_u8 keyfile ⋄ pp←_u8 passphrase
+        conn←{libssh2_userauth_publickey_fromfile_ex ⍵ u(≢u)0 k pp}_connect host port
     ∇
 
     ∇ Disconnect conn
-        :Trap 0
-            {}libssh2_sftp_shutdown conn.sftp
-        :EndTrap
-        :Trap 0
-            {}libssh2_session_disconnect_ex conn.session 11 'bye' ''
-            {}libssh2_session_free conn.session
-        :EndTrap
-        :Trap 0
-            {}close conn.fd
-        :EndTrap
+        _←libssh2_sftp_shutdown conn.sftp
+        _←libssh2_session_disconnect_ex conn.session 11 'bye' ''
+        _←libssh2_session_free conn.session
+        _←close conn.fd
     ∇
 
-    ∇ listing←List(conn path);p;handle;rc;namebuf;longbuf;attrs;name;nlen;entries
+    ∇ listing←List(conn path);p;handle;rc;namebuf;longbuf;attrs;name;nlen;entries;crc
         :If ~init ⋄ Init ⋄ :EndIf
         p←_u8 path
         handle←libssh2_sftp_open_ex conn.sftp p(≢p)0 0 OPENDIR
         ⎕SIGNAL(handle=0)/⊂('EN'SFTP_ERR)('Message'('cannot open directory: ',path,' — ',_sftperr conn))
 
         entries←⍬
-        :Repeat
-            namebuf←512⍴0
-            longbuf←512⍴0
-            rc namebuf longbuf attrs←libssh2_sftp_readdir_ex handle namebuf 512 longbuf 512 0
-            →(rc≤0)/done
-            name←'UTF-8'⎕UCS namebuf[⍳rc]
-            entries,←⊂name attrs
-        :EndRepeat
-        done:
+        :Trap 0
+            :Repeat
+                namebuf←512⍴0
+                longbuf←512⍴0
+                rc namebuf longbuf attrs←libssh2_sftp_readdir_ex handle namebuf 512 longbuf 512 0
+                →(rc≤0)/done
+                name←'UTF-8'⎕UCS namebuf[⍳rc]
+                entries,←⊂name attrs
+            :EndRepeat
+            done:
+        :Else
+            _←libssh2_sftp_close_handle handle
+            ⎕DMX.Message ⎕SIGNAL ⎕DMX.EN
+        :EndTrap
 
         :If rc<0
-            {}libssh2_sftp_close_handle handle
+            _←libssh2_sftp_close_handle handle
             ('readdir error: ',path,' — ',_sftperr conn)⎕SIGNAL SFTP_ERR
         :EndIf
 
-        {}libssh2_sftp_close_handle handle
+        crc←libssh2_sftp_close_handle handle
+        ⎕SIGNAL(crc≠0)/⊂('EN'SFTP_ERR)('Message'('close error: ',path,' — ',_sftperr conn))
         listing←entries
     ∇
 
@@ -272,35 +275,46 @@
         attrs.mtime←6⊃a
     ∇
 
-    ∇ data←Get(conn path);p;handle;buf;rc;chunks
+    ∇ data←Get(conn path);p;handle;buf;rc;chunks;crc
         :If ~init ⋄ Init ⋄ :EndIf
         p←_u8 path
         handle←libssh2_sftp_open_ex conn.sftp p(≢p)FXF_READ 0 OPENFILE
         ⎕SIGNAL(handle=0)/⊂('EN'SFTP_ERR)('Message'('cannot open file: ',path,' — ',_sftperr conn))
 
         chunks←⍬
-        :Repeat
-            buf←32768⍴0
-            rc buf←libssh2_sftp_read handle buf 32768
-            →(rc≤0)/done
-            chunks,←⊂buf[⍳rc]
-        :EndRepeat
-        done:
+        :Trap 0
+            :Repeat
+                buf←32768⍴0
+                rc buf←libssh2_sftp_read handle buf 32768
+                →(rc≤0)/done
+                chunks,←⊂buf[⍳rc]
+            :EndRepeat
+            done:
+        :Else
+            _←libssh2_sftp_close_handle handle
+            ⎕DMX.Message ⎕SIGNAL ⎕DMX.EN
+        :EndTrap
 
-        {}libssh2_sftp_close_handle handle
+        crc←libssh2_sftp_close_handle handle
 
         :If rc<0
             ('read error: ',path,' — ',_sftperr conn)⎕SIGNAL SFTP_ERR
         :EndIf
 
+        ⎕SIGNAL(crc≠0)/⊂('EN'SFTP_ERR)('Message'('close error: ',path,' — ',_sftperr conn))
         data←∊chunks
     ∇
 
     ∇ Download(conn remote local);data;tn
         data←Get conn remote
-        :Trap 0 ⋄ {}⎕NDELETE local ⋄ :EndTrap
+        :Trap 22 ⋄ ⎕NDELETE local ⋄ :EndTrap
         tn←local ⎕NCREATE 0
-        (⎕UCS data) ⎕NAPPEND tn 80
+        :Trap 0
+            (⎕UCS data) ⎕NAPPEND tn 80
+        :Else
+            ⎕NUNTIE tn
+            ⎕DMX.Message ⎕SIGNAL ⎕DMX.EN
+        :EndTrap
         ⎕NUNTIE tn
     ∇
 
@@ -314,19 +328,25 @@
 
         :While 0<≢data
             rc←libssh2_sftp_write handle data(≢data)
-            :If rc<0
-                {}libssh2_sftp_close_handle handle
+            :If rc≤0
+                _←libssh2_sftp_close_handle handle
                 ('write error: ',remote,' — ',_sftperr conn)⎕SIGNAL SFTP_ERR
             :EndIf
             data↓⍨←rc
         :EndWhile
 
-        {}libssh2_sftp_close_handle handle
+        rc←libssh2_sftp_close_handle handle
+        ⎕SIGNAL(rc≠0)/⊂('EN'SFTP_ERR)('Message'('close error: ',remote,' — ',_sftperr conn))
     ∇
 
     ∇ Upload(conn local remote);data;tn
         tn←local ⎕NTIE 0
-        data←256|⎕NREAD tn 83(⎕NSIZE tn)
+        :Trap 0
+            data←256|⎕NREAD tn 83(⎕NSIZE tn)
+        :Else
+            ⎕NUNTIE tn
+            ⎕DMX.Message ⎕SIGNAL ⎕DMX.EN
+        :EndTrap
         ⎕NUNTIE tn
         Put conn data remote
     ∇
@@ -353,6 +373,7 @@
     ∇
 
     ∇ Rename(conn old new);o;n;rc
+        ⍝ Flags=7 (OVERWRITE|ATOMIC|NATIVE): overwrites target if it exists
         :If ~init ⋄ Init ⋄ :EndIf
         o←_u8 old ⋄ n←_u8 new
         rc←libssh2_sftp_rename_ex conn.sftp o(≢o)n(≢n)7
