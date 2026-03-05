@@ -1,4 +1,4 @@
-# aplsftp
+# aplsaft
 
 A minimal SFTP client library for Dyalog APL, built on libssh2 via `⎕NA`.
 
