@@ -92,8 +92,13 @@
 
     ⍝ ── Operations ─────────────────────────────────────────────────
 
-    ∇ _mkdir(conn base model);parent;name;path
-        parent←_pick model.dirs
+    ∇ _mkdir(conn base model);parent;name;path;nonroot
+        nonroot←model.dirs~⊂'/'
+        :If (0<≢nonroot)∧0=?2
+            parent←_pick nonroot
+        :Else
+            parent←_pick model.dirs
+        :EndIf
         name←_randname 4+?5
         path←(('/'≡parent)↓parent),'/',name
         #.SFTP.Mkdir conn(base,path)
@@ -101,15 +106,22 @@
         ⎕←'  mkdir ',path
     ∇
 
-    ∇ _put(conn base model);dir;name;path;data
+    ∇ _put(conn base model);dir;name;path;data;text
         dir←_pick model.dirs
         name←(_randname 4+?5),'.dat'
         path←(('/'≡dir)↓dir),'/',name
-        data←?(1+?999+39001×0=?5)⍴256
-        #.SFTP.Put conn data(base,path)
-        model.files←(path∘≢¨_fpaths model.files)/model.files  ⍝ remove collision if any
+        text←0=?3
+        :If text  ⍝ ~33%: character data (exercises UTF-8 auto-conversion)
+            data←⎕UCS 32+?(1+?200)⍴(95+900×0=?2)
+            #.SFTP.Put conn data(base,path)
+            data←'UTF-8'⎕UCS data
+        :Else
+            data←?(1+?999+39001×0=?5)⍴256
+            #.SFTP.Put conn data(base,path)
+        :EndIf
+        model.files←(path∘≢¨_fpaths model.files)/model.files
         model.files,←⊂path data
-        ⎕←'  put ',path,' (',(⍕≢data),' bytes)'
+        ⎕←'  put ',path,' (',(⍕≢data),' bytes',(text/' text'),')'
     ∇
 
     ∇ _get(conn base model);idx;entry;path;expected;actual
@@ -127,7 +139,7 @@
         :EndIf
     ∇
 
-    ∇ _list(conn base model);dir;actual;anames;edirs;efiles;enames
+    ∇ _list(conn base model);dir;actual;anames;edirs;efiles;enames;filtered;entry;name;fpath;midx;esize;asize
         dir←_pick model.dirs
         actual←#.SFTP.List conn(base _fullpath dir)
         anames←⊃¨actual
@@ -147,11 +159,26 @@
             ⎕←'    actual:   ',⍕anames
             ('list mismatch: ',dir)⎕SIGNAL 99
         :Else
+            ⍝ Check file sizes in listing attrs
+            filtered←(~(⊃¨actual)∊(,'.') '..')/actual
+            :For entry :In filtered
+                name←0⊃entry
+                :If (⊂name)∊efiles
+                    fpath←(('/'≡dir)↓dir),'/',name
+                    midx←(_fpaths model.files)⍳⊂fpath
+                    esize←≢1⊃midx⊃model.files
+                    asize←(1⊃entry)[1]
+                    :If esize≠asize
+                        ⎕←'  LIST SIZE MISMATCH: ',fpath,' expected ',(⍕esize),' got ',⍕asize
+                        ('list size mismatch: ',fpath)⎕SIGNAL 99
+                    :EndIf
+                :EndIf
+            :EndFor
             ⎕←'  list ',dir,' OK (',(⍕≢anames),' entries)'
         :EndIf
     ∇
 
-    ∇ _stat(conn base model);idx;entry;path;expected_size;attrs
+    ∇ _stat(conn base model);idx;entry;path;expected_size;attrs;perms
         →(0=≢model.files)/0
         idx←?≢model.files
         entry←idx⊃model.files
@@ -161,9 +188,13 @@
         :If expected_size≠attrs.filesize
             ⎕←'  STAT SIZE MISMATCH: ',path,' expected ',(⍕expected_size),' got ',⍕attrs.filesize
             ('stat mismatch: ',path)⎕SIGNAL 99
-        :Else
-            ⎕←'  stat ',path,' OK (',(⍕expected_size),' bytes)'
         :EndIf
+        perms←4096|attrs.permissions
+        :If perms≠8⊥6 4 4
+            ⎕←'  STAT PERMS MISMATCH: ',path,' expected 0644 got ',⍕perms
+            ('stat perms mismatch: ',path)⎕SIGNAL 99
+        :EndIf
+        ⎕←'  stat ',path,' OK (',(⍕expected_size),' bytes)'
     ∇
 
     ∇ _rename(conn base model);idx;entry;oldpath;dir;newname;newpath;data
