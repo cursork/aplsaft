@@ -2,6 +2,8 @@
 
 Two implementations for SFTP in Dyalog APL.
 
+**PLEASE DO NOT USE THIS** - it's only one evening and one morning's work.
+
 ## SFTP.apln
 
 A minimal SFTP client library for Dyalog APL, built on libssh2 via `⎕NA`. No
