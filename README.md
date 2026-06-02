@@ -18,7 +18,7 @@ discussed below.
 
 ## SSHClient.aplc
 
-_Bombardier-C-Kram's contribution_ (thanks!)
+_[Bombardier-C-Kram](https://github.com/Bombardier-C-Kram)'s contribution_ (thanks!) 
 
 A completely separate and more 'pure' Dyalog implementation, in the sense that the
 only dependency is Conga, and that much of the code is APL implementing the
