@@ -1,22 +1,33 @@
 # aplsaft
 
-Two implementations for SFTP in Dyalog APL.
-
-**PLEASE DO NOT USE THIS** - it's only one evening and one morning's work.
+Two implementations for SFTP in Dyalog APL, by two implementers.
 
 ## SFTP.apln
+
+_cursork's contribution_
+
+It's only one evening and one morning's work. It's tested, and I am happy to
+use it. I am _extremely nervous_ about others relying on it. See the
+[testing](#Testing) notes.
 
 A minimal SFTP client library for Dyalog APL, built on libssh2 via `⎕NA`. No
 Conga. No external APL dependencies. One file.
 
-The rest of the docs are concerned with this, as it currently stands.
+Everything in the repo is related to SFTP.apln, except SSHClient.aplc as
+discussed below.
 
 ## SSHClient.aplc
 
-A completely separate and 'pure' Dyalog implementation, in the sense that the
-only dependency is Conga.
+_Bombardier-C-Kram's contribution_ (thanks!)
 
-## SFTP Namespace
+A completely separate and more 'pure' Dyalog implementation, in the sense that the
+only dependency is Conga, and that much of the code is APL implementing the
+protocol.
+
+I (_cursork_) suggest that if you are familiar with APL, this version may be
+interesting in the case you want to know some of the details.
+
+## SFTP Namespace Usage
 
 ### Requirements
 
