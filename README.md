@@ -8,7 +8,7 @@ _cursork's contribution_
 
 It's only one evening and one morning's work. It's tested, and I am happy to
 use it. I am _extremely nervous_ about others relying on it. See the
-[testing](#Testing) notes.
+[testing](#Testing) notes, for how I've tried to mitigate that.
 
 A minimal SFTP client library for Dyalog APL, built on libssh2 via `⎕NA`. No
 Conga. No external APL dependencies. One file.
